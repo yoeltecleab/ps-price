@@ -114,7 +114,34 @@ docker compose up -d
 
 ## AWS Deployment
 
-This section deploys PS Price on **Amazon EC2** with **Docker Compose**, an **Application Load Balancer**, **ACM** TLS, and **Route 53** DNS. This is the recommended AWS path for SQLite-based workloads: one instance, one EBS volume, predictable performance.
+### Recommended: single EC2 + Caddy (simple)
+
+PS Price uses the **same deployment pattern** as a typical Docker capstone project:
+
+- **One EC2 instance** (no load balancer)
+- **Docker Compose** (`docker-compose.yml` + `docker-compose.aws.yml`)
+- **Caddy** on ports 80/443 for HTTPS (automatic Let's Encrypt)
+- **Frontend** proxies `/api/*` to the backend internally — Caddy only talks to port 3000
+
+**Full step-by-step guide:** [docs/DEPLOYMENT-AWS.md](docs/DEPLOYMENT-AWS.md)
+
+Quick deploy on a fresh Ubuntu EC2:
+
+```bash
+git clone https://github.com/yoeltecleab/ps-price.git
+cd ps-price
+cp .env.example .env          # edit PS_PRICE_CORS_ORIGINS for your IP/domain
+cp Caddyfile.example Caddyfile  # edit with your domain or use :80 for IP-only
+docker compose -f docker-compose.yml -f docker-compose.aws.yml up -d --build
+```
+
+**Estimated cost:** ~$0–17/month (`t2.micro` free tier or `t3.small` recommended for catalog sync).
+
+---
+
+### Advanced: EC2 + Application Load Balancer (optional)
+
+The section below documents an **ALB + ACM + Route 53** setup for teams that need managed TLS at the load balancer or plan to scale beyond one instance. For most personal deployments, **use the single-EC2 guide above instead.**
 
 **Estimated monthly cost (us-east-1, light traffic):** ~$25–45  
 (t3.small EC2 + 20 GB gp3 EBS + ALB + minimal data transfer)
@@ -613,6 +640,7 @@ PS_PRICE_REQUEST_MIN_INTERVAL_SECONDS=5
 
 ## Support
 
+- **Single-EC2 AWS guide:** [docs/DEPLOYMENT-AWS.md](docs/DEPLOYMENT-AWS.md)
 - **API docs:** `/docs` on the backend (e.g. `https://psprice.yourdomain.com/docs` if routed via ALB)
 - **Health:** `/healthz`
 - **Sync status:** `/api/sync-status`

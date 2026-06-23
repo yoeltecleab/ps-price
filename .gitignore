@@ -9,6 +9,9 @@ data/
 *.db
 .DS_Store
 
+# AWS (created on server — do not commit secrets)
+Caddyfile
+
 # Frontend
 frontend/node_modules/
 frontend/.next/

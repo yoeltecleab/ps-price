@@ -1,0 +1,20 @@
+# Caddyfile.example — copy to Caddyfile and edit before deploying on AWS.
+#
+# Caddy terminates HTTPS and forwards all traffic to the Next.js frontend.
+# The frontend proxies /api/* and /healthz to the backend on the Docker network.
+#
+# === OPTION A: Production with a real domain (HTTPS, recommended) ==========
+# Replace psprice.yourdomain.com with your actual domain.
+# Your domain's A record must point at your EC2 Elastic IP before Caddy starts.
+#
+# psprice.yourdomain.com {
+#     reverse_proxy frontend:3000
+# }
+
+# === OPTION B: Direct IP access, HTTP only (demo / testing) ================
+# Use this if you don't have a domain yet.
+# Access via http://<your-EC2-elastic-ip>
+#
+:80 {
+    reverse_proxy frontend:3000
+}
