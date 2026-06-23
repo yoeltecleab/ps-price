@@ -1,7 +1,7 @@
 services:
   backend:
     build:
-      context: .
+      context: ./backend
       dockerfile: Dockerfile
     container_name: ps-price-backend
     env_file:
@@ -11,6 +11,7 @@ services:
       PS_PRICE_DATABASE_PATH: /data/ps_price.sqlite3
       PS_PRICE_CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
       PS_PRICE_FEED_SYNC_INTERVAL_MINUTES: "60"
+      PS_PRICE_SCHEDULER_ENABLED: "true"
       PYTHONUNBUFFERED: "1"
     ports:
       - "8000:8000"

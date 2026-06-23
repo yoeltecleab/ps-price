@@ -18,10 +18,21 @@ from backend.app.money import currency_for_locale, money_to_cents
 from backend.app.ps_store import _select_image, product_url
 
 GRAPHQL_URL = "https://web.np.playstation.com/api/graphql/v1/op"
-CATEGORY_GRID_HASH = "9845afc0dbaab4965f6563fffc703f588c8e76792000e8610843b8d3ee9c4c09"
 
-# en-us "All Deals" category (cat.gma.AllDeals) — ~4k+ products
+# Deals grid — flat `products` array (~4.5k sale items en-us)
+DEALS_GRID_HASH = "9845afc0dbaab4965f6563fffc703f588c8e76792000e8610843b8d3ee9c4c09"
 ALL_DEALS_CATEGORY_ID = "3f772501-f6f8-49b7-abac-874a88ca4897"
+
+# Full store browse grid — `concepts` array (games with and without discounts)
+STORE_CATALOG_GRID_ID = "28c9c2b2-cecc-415c-9a08-482a605cb104"
+STORE_CATALOG_GRID_HASH = "4e41660b6732f35c99fc5541926b7502a09557924e8c2cfebd1beb1a5c8c8f81"
+STORE_CATALOG_FACETS = [
+    "targetPlatforms",
+    "productGenres",
+    "webBasePrice",
+    "productReleaseDate",
+    "storeDisplayClassification",
+]
 
 LOCALE_ACCEPT_LANGUAGE = {
     "en-us": "en-US,en;q=0.9",
@@ -39,16 +50,25 @@ def locale_accept_language(locale: str) -> str:
     return LOCALE_ACCEPT_LANGUAGE.get(locale.lower(), "en-US,en;q=0.9")
 
 
+def shard_filter_by(shard: str) -> list[str]:
+    """Map a browse shard label to GraphQL filterBy tokens."""
+    label = (shard or "").strip()
+    if not label or label.lower() in {"all", "base", "default"}:
+        return []
+    return [f"targetPlatforms:{label.upper()}"]
+
+
 def parse_graphql_product(
     product: dict[str, Any],
     locale: str,
     origin: str,
     *,
     popularity_rank: int | None = None,
+    name_override: str | None = None,
 ) -> SearchResult | None:
     """Convert a GraphQL Product node into a SearchResult."""
     product_id = product.get("id")
-    name = product.get("name")
+    name = name_override or product.get("name")
     if not isinstance(product_id, str) or not product_id or not isinstance(name, str) or not name:
         return None
 
@@ -79,6 +99,46 @@ def parse_graphql_product(
     )
 
 
+def parse_graphql_concept(
+    concept: dict[str, Any],
+    locale: str,
+    origin: str,
+    *,
+    popularity_rank: int | None = None,
+) -> SearchResult | None:
+    """Convert a browse-grid Concept node into a SearchResult."""
+    name = concept.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+
+    products = concept.get("products") or []
+    product: dict[str, Any] | None = None
+    product_id: str | None = None
+    for candidate in products:
+        if isinstance(candidate, dict) and isinstance(candidate.get("id"), str) and candidate["id"]:
+            product = candidate
+            product_id = candidate["id"]
+            break
+    if not product_id:
+        return None
+
+    merged = dict(product)
+    if not merged.get("media") and concept.get("media"):
+        merged["media"] = concept.get("media")
+    if not isinstance(merged.get("price"), dict) and isinstance(concept.get("price"), dict):
+        merged["price"] = concept.get("price")
+    if not merged.get("platforms") and concept.get("platforms"):
+        merged["platforms"] = concept.get("platforms")
+
+    return parse_graphql_product(
+        merged,
+        locale,
+        origin,
+        popularity_rank=popularity_rank,
+        name_override=name.strip(),
+    )
+
+
 async def fetch_category_products(
     client: httpx.AsyncClient,
     *,
@@ -88,10 +148,17 @@ async def fetch_category_products(
     page_size: int = 100,
     max_pages: int | None = None,
     min_interval: float = 1.0,
+    graphql_hash: str = DEALS_GRID_HASH,
+    sort_by: dict[str, Any] | None | object = ...,
+    filter_by: list[str] | None = None,
+    facet_options: list[str] | None = None,
     on_page: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[SearchResult]:
     """Paginate a categoryGridRetrieve query until all products are fetched."""
     import asyncio
+
+    if sort_by is ...:
+        sort_by = {"name": "sales30", "isAscending": False}
 
     results: list[SearchResult] = []
     seen: set[str] = set()
@@ -102,12 +169,12 @@ async def fetch_category_products(
         if max_pages is not None and page_index >= max_pages:
             break
 
-        variables = {
+        variables: dict[str, Any] = {
             "id": category_id,
             "pageArgs": {"size": page_size, "offset": offset},
-            "sortBy": {"name": "sales30", "isAscending": False},
-            "filterBy": [],
-            "facetOptions": [],
+            "sortBy": sort_by,
+            "filterBy": filter_by or [],
+            "facetOptions": facet_options or [],
         }
         params = {
             "operationName": "categoryGridRetrieve",
@@ -116,7 +183,7 @@ async def fetch_category_products(
                 {
                     "persistedQuery": {
                         "version": 1,
-                        "sha256Hash": CATEGORY_GRID_HASH,
+                        "sha256Hash": graphql_hash,
                     }
                 },
                 separators=(",", ":"),
@@ -138,6 +205,7 @@ async def fetch_category_products(
 
         grid = payload.get("data", {}).get("categoryGridRetrieve") or {}
         products = grid.get("products") or []
+        concepts = grid.get("concepts") or []
         page_info = grid.get("pageInfo") or {}
 
         page_count = 0
@@ -146,6 +214,20 @@ async def fetch_category_products(
                 continue
             parsed = parse_graphql_product(
                 product,
+                locale,
+                origin,
+                popularity_rank=len(results) + 1,
+            )
+            if parsed and parsed.product_id not in seen:
+                seen.add(parsed.product_id)
+                results.append(parsed)
+                page_count += 1
+
+        for concept in concepts:
+            if not isinstance(concept, dict):
+                continue
+            parsed = parse_graphql_concept(
+                concept,
                 locale,
                 origin,
                 popularity_rank=len(results) + 1,
@@ -166,7 +248,7 @@ async def fetch_category_products(
                 }
             )
 
-        if page_info.get("isLast") or not products:
+        if page_info.get("isLast") or (not products and not concepts):
             break
 
         offset += page_size
@@ -175,6 +257,53 @@ async def fetch_category_products(
             await asyncio.sleep(min_interval)
 
     return results
+
+
+async def fetch_store_catalog(
+    client: httpx.AsyncClient,
+    *,
+    locale: str,
+    origin: str,
+    shards: list[str],
+    page_size: int = 100,
+    max_pages: int | None = None,
+    min_interval: float = 1.0,
+    deals_category_id: str = ALL_DEALS_CATEGORY_ID,
+) -> list[SearchResult]:
+    """Fetch the full PS Store catalog (all games) plus deal pricing overlay."""
+    merged: dict[str, SearchResult] = {}
+
+    for shard in shards:
+        shard_rows = await fetch_category_products(
+            client,
+            category_id=STORE_CATALOG_GRID_ID,
+            locale=locale,
+            origin=origin,
+            page_size=page_size,
+            max_pages=max_pages,
+            min_interval=min_interval,
+            graphql_hash=STORE_CATALOG_GRID_HASH,
+            sort_by=None,
+            filter_by=shard_filter_by(shard),
+            facet_options=STORE_CATALOG_FACETS,
+        )
+        for row in shard_rows:
+            merged[row.product_id] = row
+
+    deal_rows = await fetch_category_products(
+        client,
+        category_id=deals_category_id,
+        locale=locale,
+        origin=origin,
+        page_size=page_size,
+        max_pages=max_pages,
+        min_interval=min_interval,
+        graphql_hash=DEALS_GRID_HASH,
+    )
+    for row in deal_rows:
+        merged[row.product_id] = row
+
+    return list(merged.values())
 
 
 def _first_str(*values: object) -> str | None:

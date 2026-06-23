@@ -10,7 +10,6 @@ handlers via FastAPI's dependency injection system.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import Annotated
@@ -87,15 +86,6 @@ async def lifespan(app: FastAPI):
 
     await scheduler.start()
     try:
-        if settings.scheduler_enabled:
-
-            async def _bootstrap_deals() -> None:
-                try:
-                    await service.sync_deals()
-                except Exception:
-                    logger.exception("Background deals sync failed")
-
-            asyncio.create_task(_bootstrap_deals(), name="ps-price-deals-bootstrap")
         yield
     finally:
         await scheduler.stop()

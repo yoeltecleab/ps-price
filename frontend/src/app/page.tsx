@@ -91,29 +91,18 @@ export default function DealsHomePage() {
   }, [loadDeals]);
 
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const status = await pollSyncStatus();
-      if (cancelled) return;
-      if (!status?.catalog_total) {
-        setSyncing(true);
-        try {
-          await api("/api/sync-deals", { method: "POST" });
-        } catch {
-          /* background sync may already be running */
-        }
-        pollRef.current = setInterval(() => {
-          void pollSyncStatus().then((s) => {
-            if (s && s.catalog_total > 100) {
-              setSyncing(false);
-              if (pollRef.current) clearInterval(pollRef.current);
-            }
-          });
-        }, 3000);
+    void pollSyncStatus().then((status) => {
+      if (status) {
+        setSyncing(status.catalog_total === 0 && !status.last_sync);
       }
-    })();
+    });
+    pollRef.current = setInterval(() => {
+      void pollSyncStatus().then((status) => {
+        if (!status) return;
+        setSyncing(status.catalog_total === 0 && !status.last_sync);
+      });
+    }, 3000);
     return () => {
-      cancelled = true;
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, [pollSyncStatus]);
@@ -267,7 +256,7 @@ export default function DealsHomePage() {
           className="mt-10 grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4"
         >
           {[
-            { label: "Live deals", value: data?.total ?? syncStatus?.catalog_total ?? "—", glow: false },
+            { label: filters.onSaleOnly ? "Matching deals" : "Matching games", value: data?.total ?? "—", glow: false },
             { label: "Peak cut", value: topDiscount ? `${topDiscount}%` : "—", glow: true },
             {
               label: "Feed status",
@@ -307,7 +296,7 @@ export default function DealsHomePage() {
         >
           <Button onClick={handleSync} loading={syncing} size="lg">
             <ArrowsClockwise className="size-4" weight="bold" />
-            {syncing ? "Syncing 4,000+ deals…" : "Sync PlayStation feed"}
+            {syncing ? "Syncing catalog…" : "Sync PlayStation catalog"}
           </Button>
           {data?.last_sync ? (
             <span className="font-data text-xs text-muted flex items-center gap-1.5">
@@ -334,9 +323,9 @@ export default function DealsHomePage() {
             setPage(0);
             setFilters((f) => ({ ...f, q: e.target.value }));
           }}
-          placeholder="Query the deal matrix…"
+          placeholder="Search the catalog…"
           className="h-12 w-full rounded-[var(--radius-md)] holo-panel px-5 font-data text-sm text-ink placeholder:text-muted focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
-          aria-label="Filter deals by name"
+          aria-label="Filter games by name"
         />
         <FilterPanel
           filters={filters}
@@ -367,7 +356,7 @@ export default function DealsHomePage() {
         <div className="text-center py-24 holo-panel-strong rounded-[var(--radius-xl)]">
           <p className="font-display text-2xl font-bold text-ink">Signal lost</p>
           <p className="mt-3 text-muted max-w-sm mx-auto text-pretty">
-            No deals match your filters. Sync the store or widen your search.
+            No games match your filters. Sync the catalog or widen your search.
           </p>
           <Button className="mt-8" size="lg" onClick={handleSync} loading={syncing}>
             Initialize feed
@@ -377,7 +366,7 @@ export default function DealsHomePage() {
         <>
           <section>
             <h2 className="font-data text-xs uppercase tracking-[0.25em] text-muted mb-4">
-              All deals
+              {filters.onSaleOnly ? "Deals" : "All games"}
             </h2>
             <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4">
               {items.map((game, i) => (

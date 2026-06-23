@@ -8,7 +8,7 @@
 #   - Adds Caddy as the HTTPS reverse proxy on ports 80/443
 #
 # Prerequisites:
-#   - A Caddyfile in the repo root (see Caddyfile.example)
+#   - A Caddyfile on the server (see deploy/Caddyfile.example)
 #   - Your domain's A record pointing at your EC2 Elastic IP (for HTTPS)
 #   - .env filled out with production values (especially PS_PRICE_CORS_ORIGINS)
 
@@ -30,7 +30,7 @@ services:
       - "443:443"
       - "443:443/udp"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
     networks:

@@ -3,14 +3,15 @@
 .idea/
 __pycache__/
 .pytest_cache/
-data/
+backend/data/
 *.py[cod]
 *.sqlite3
 *.db
 .DS_Store
+*.iml
 
 # AWS (created on server — do not commit secrets)
-Caddyfile
+deploy/Caddyfile
 
 # Frontend
 frontend/node_modules/

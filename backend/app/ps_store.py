@@ -142,23 +142,24 @@ class PlayStationStoreClient:
     async def fetch_deals(
         self, locale: str | None = None, force: bool = False
     ) -> list[SearchResult]:
-        """Fetch all current PlayStation Store deals via the public GraphQL API."""
-        from backend.app.ps_graphql import fetch_category_products
+        """Fetch the full PlayStation Store catalog (all games + deal pricing)."""
+        from backend.app.ps_graphql import fetch_store_catalog
 
         active_locale = normalize_locale(locale or self.settings.store_locale)
-        cache_key = f"deals-graphql:{active_locale}"
+        cache_key = f"catalog-full:{active_locale}"
         cached = self._get_cached(cache_key, force)
         if isinstance(cached, list):
             return cached
 
-        results = await fetch_category_products(
+        results = await fetch_store_catalog(
             self._client,
-            category_id=self.settings.deals_category_id,
             locale=active_locale,
             origin=self.settings.store_origin,
+            shards=self.settings.catalog_sync_shard_list or ["all"],
             page_size=self.settings.graphql_page_size,
-            max_pages=self.settings.deals_sync_max_pages,
+            max_pages=self.settings.catalog_sync_max_pages,
             min_interval=self.settings.graphql_min_interval_seconds,
+            deals_category_id=self.settings.deals_category_id,
         )
         self._cache[cache_key] = _CacheEntry(datetime.now(UTC), results)
         return results

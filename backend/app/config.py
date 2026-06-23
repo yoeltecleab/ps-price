@@ -16,8 +16,10 @@ from functools import lru_cache
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# en-us "All Deals" category (cat.gma.AllDeals) — ~4k+ products via GraphQL
+# en-us "All Deals" category (cat.gma.AllDeals) — ~4k+ sale products via GraphQL
 ALL_DEALS_CATEGORY_ID = "3f772501-f6f8-49b7-abac-874a88ca4897"
+# Full store browse grid — ~10k concepts per shard (games with and without discounts)
+STORE_CATALOG_GRID_ID = "28c9c2b2-cecc-415c-9a08-482a605cb104"
 
 
 class Settings(BaseSettings):
@@ -37,7 +39,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PS_PRICE_", env_file=".env", extra="ignore")
 
     app_name: str = "PS Price"
-    database_path: str = "data/ps_price.sqlite3"
+    database_path: str = "backend/data/ps_price.sqlite3"
     store_origin: str = "https://store.playstation.com"
     store_locale: str = "en-us"
     user_agent: str = (
@@ -65,9 +67,17 @@ class Settings(BaseSettings):
 
     max_search_limit: int = Field(default=24, ge=1, le=48)
     deals_category_id: str = ALL_DEALS_CATEGORY_ID
+    catalog_category_id: str = STORE_CATALOG_GRID_ID
+    catalog_sync_shards: str = "all,PS5,PS4"
     graphql_page_size: int = Field(default=100, ge=10, le=200)
     graphql_min_interval_seconds: float = 1.0
+    catalog_sync_max_pages: int | None = None
     deals_sync_max_pages: int | None = None
+
+    @property
+    def catalog_sync_shard_list(self) -> list[str]:
+        shards = [part.strip() for part in self.catalog_sync_shards.split(",")]
+        return [shard for shard in shards if shard]
 
     @property
     def cors_origin_list(self) -> list[str]:

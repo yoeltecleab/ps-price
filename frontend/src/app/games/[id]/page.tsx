@@ -64,7 +64,7 @@ export default function GameDetailPage({
   async function handleRefresh() {
     setRefreshing(true);
     try {
-      await api("/api/sync-deals", { method: "POST" });
+      await api(`/api/games/${gameId}/refresh`, { method: "POST" });
       await loadGame();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Refresh failed");

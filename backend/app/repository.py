@@ -391,7 +391,7 @@ class Repository:
         if platform:
             where.append("platforms LIKE ?")
             params.append(f'%"{platform}"%')
-        if min_discount is not None:
+        if min_discount is not None and min_discount > 0:
             where.append("discount_percent >= ?")
             params.append(min_discount)
         if max_price_cents is not None:

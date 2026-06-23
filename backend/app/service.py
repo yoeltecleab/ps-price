@@ -69,28 +69,34 @@ class PriceService:
         return self.repo.bulk_mark_tracked(game_ids)
 
     async def sync_deals(self, locale: str | None = None, force: bool = False) -> dict:
-        """Pull current PS Store deals into the local catalog and evaluate watches."""
+        """Pull the full PS Store catalog into the local database and evaluate watches."""
         active_locale = normalize_locale(locale or self.settings.store_locale)
         tracked_before = {
             g["id"]: g.get("current_price_cents")
             for g in self.repo.list_games(tracked_only=True)
         }
-        deals = await self.store_client.fetch_deals(active_locale, force=force)
-        count = self.repo.upsert_catalog_entries(deals)
+        catalog_rows = await self.store_client.fetch_deals(active_locale, force=force)
+        count = self.repo.upsert_catalog_entries(catalog_rows)
         now = utc_now_iso()
         self.repo.set_catalog_meta("last_deals_sync", now)
         self.repo.set_catalog_meta("last_deals_count", str(count))
-        self.repo.set_catalog_meta("last_deals_reported", str(len(deals)))
+        self.repo.set_catalog_meta("last_deals_reported", str(len(catalog_rows)))
+        self.repo.set_catalog_meta("last_catalog_sync", now)
+        self.repo.set_catalog_meta("last_catalog_reported", str(len(catalog_rows)))
 
-        if tracked_before:
-            for game in self.repo.list_games(tracked_only=True):
-                previous = tracked_before.get(game["id"])
-                current = game.get("current_price_cents")
-                if previous is not None and current != previous:
-                    await self._evaluate_watches(game, previous)
-                self.repo.mark_game_checked(game["id"], now)
+        for game in self.repo.list_games(tracked_only=True):
+            previous = tracked_before.get(game["id"])
+            current = game.get("current_price_cents")
+            if previous is not None and current != previous:
+                await self._evaluate_watches(game, previous)
+            self.repo.mark_game_checked(game["id"], now)
 
-        return {"synced": count, "fetched": len(deals), "locale": active_locale}
+        return {
+            "synced": count,
+            "fetched": len(catalog_rows),
+            "locale": active_locale,
+            "catalog_total": len(catalog_rows),
+        }
 
     async def search_unified(
         self, query: str, locale: str | None, limit: int

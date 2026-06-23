@@ -87,10 +87,15 @@ export function FilterPanel({
                     "h-9 px-4 rounded-full font-data text-xs uppercase tracking-wider border transition-all",
                     filters.onSaleOnly
                       ? "bg-accent/20 text-accent border-accent/40"
-                      : "text-muted border-border",
+                      : "text-muted border-border hover:border-accent/50 hover:text-ink",
                   ].join(" ")}
+                  title={
+                    filters.onSaleOnly
+                      ? "Showing discounted games only. Turn off to include full-price titles."
+                      : "Showing all catalog games, including full price."
+                  }
                 >
-                  On sale
+                  {filters.onSaleOnly ? "On sale only" : "All prices"}
                 </button>
               </div>
 
@@ -139,7 +144,7 @@ export function FilterPanel({
                       Min discount
                     </label>
                     <span className="font-data text-xs text-accent tabular-nums">
-                      {filters.minDiscount}%
+                      {filters.minDiscount === 0 ? "Any" : `${filters.minDiscount}%`}
                     </span>
                   </div>
                   <input
@@ -153,6 +158,11 @@ export function FilterPanel({
                     }
                     className="w-full h-1 accent-accent bg-border rounded-full appearance-none cursor-pointer"
                   />
+                  <p className="mt-2 font-data text-[11px] text-muted leading-relaxed">
+                    {filters.onSaleOnly
+                      ? "Turn off “On sale only” to browse full-price games."
+                      : "Full catalog — deals and list price."}
+                  </p>
                 </div>
                 <div>
                   <label className="font-data text-xs uppercase tracking-wider text-muted mb-2 block">

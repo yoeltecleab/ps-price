@@ -288,8 +288,8 @@ chmod 600 .env
 ## 13. Configure Caddy (HTTPS reverse proxy)
 
 ```bash
-cp Caddyfile.example Caddyfile
-nano Caddyfile
+cp deploy/Caddyfile.example deploy/Caddyfile
+nano deploy/Caddyfile
 ```
 
 ### Option A: Domain (HTTPS — recommended)
@@ -324,7 +324,7 @@ docker compose -f docker-compose.yml -f docker-compose.aws.yml up -d --build
 
 1. Docker builds the FastAPI backend and Next.js frontend images.
 2. Three containers start: `backend`, `frontend`, `caddy`.
-3. Backend bootstraps the PlayStation deals catalog (~4,000 titles) in the background.
+3. Backend scheduler syncs the full PlayStation catalog on container start (10,000+ titles).
 4. Caddy obtains a TLS certificate automatically if you used Option A.
 
 > **First build takes 5–15 minutes** on a small instance.
@@ -369,7 +369,7 @@ curl -s http://localhost/healthz | python3 -m json.tool
 curl -s http://localhost/api/sync-status | python3 -m json.tool
 ```
 
-Wait until `catalog_total` is above 1000 (first sync may take 1–3 minutes):
+Wait until `catalog_total` is above 1000 (first full-catalog sync may take 5–15 minutes):
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.aws.yml logs -f backend
@@ -410,7 +410,7 @@ docker compose -f docker-compose.yml -f docker-compose.aws.yml ps
    - Value: your Elastic IP
    - TTL: `300`
 2. Wait 5–30 minutes → `nslookup psprice.yourdomain.com`
-3. Update `Caddyfile` to Option A (Step 13).
+3. Update `deploy/Caddyfile` to Option A (Step 13).
 4. Update `.env`:
    ```env
    PS_PRICE_CORS_ORIGINS=https://psprice.yourdomain.com
@@ -524,7 +524,7 @@ curl -s http://localhost/api/sync-status | python3 -m json.tool
 | File | Purpose |
 |------|---------|
 | `docker-compose.aws.yml` | Overlay: Caddy + hide backend/frontend ports |
-| `Caddyfile.example` | Template — copy to `Caddyfile` on the server |
+| `deploy/Caddyfile.example` | Template — copy to `deploy/Caddyfile` on the server |
 | `.env.example` | All `PS_PRICE_*` environment variables |
 
 ---
