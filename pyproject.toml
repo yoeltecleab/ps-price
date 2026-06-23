@@ -1,0 +1,20 @@
+[project]
+name = "ps-price"
+version = "0.1.0"
+description = "Backend API for tracking PlayStation Store prices."
+requires-python = ">=3.14"
+dependencies = [
+  "fastapi>=0.115,<1.0",
+  "httpx>=0.28,<1.0",
+  "pydantic-settings>=2.7,<3.0",
+  "uvicorn[standard]>=0.34,<1.0"
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=9,<10"
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

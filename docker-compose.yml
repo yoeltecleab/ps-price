@@ -1,0 +1,55 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ps-price-backend
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PS_PRICE_DATABASE_PATH: /data/ps_price.sqlite3
+      PS_PRICE_CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
+      PS_PRICE_FEED_SYNC_INTERVAL_MINUTES: "60"
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ps-price-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - ps-price-network
+    labels:
+      - "com.example.ps-price=backend"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ps-price-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      INTERNAL_API_URL: http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - ps-price-network
+    labels:
+      - "com.example.ps-price=frontend"
+
+volumes:
+  ps-price-data:
+    driver: local
+
+networks:
+  ps-price-network:
+    driver: bridge
