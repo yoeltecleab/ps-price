@@ -6,7 +6,7 @@ PS Price is a backend service that scrapes the PlayStation Store and tracks game
 
 ```
 ┌─────────────────┐
-│   Frontend      │  (Next.js - future)
+│   Frontend      │  Next.js
 │   (React)       │
 └────────┬────────┘
          │ HTTP/JSON
@@ -40,8 +40,8 @@ PS Price is a backend service that scrapes the PlayStation Store and tracks game
 └──────────────┼────────┼────────────────────────┘
                │        │
         ┌──────▼──┐  ┌──▼──────┐
-        │ SQLite  │  │PlayStation
-        │ Database│  │ Store API
+        │PostgreSQL│ │PlayStation
+        │ (SQLAlchemy)│ Store API
         │         │  │
         └─────────┘  └─────────┘
 ```
@@ -108,33 +108,12 @@ Data access layer - all SQL and database operations:
 - **log_notification()** - Record notification attempt
 - **list_notifications()** - Query notification log
 
-### 5. **Database** (`database.py`)
-SQLite schema and connection management:
-- **connect()** - Context manager for connections (WAL mode, foreign keys on)
-- **migrate()** - Create schema tables on startup
+### 5. **Database** (`app/db/` + Alembic)
+PostgreSQL via SQLAlchemy 2.0 ORM and Alembic migrations:
+- **Database.session()** — Context manager for SQLAlchemy sessions
+- **Database.migrate()** — Run `alembic upgrade head` on startup
 
-**Schema:**
-```sql
-games (id, product_id, locale, name, category, image_url, store_url, 
-       currency, current_price_cents, current_price_formatted, 
-       original_price_cents, original_price_formatted, discount_text, 
-       availability, price_source, sale_end_at, 
-       last_checked_at, last_success_at, last_error, raw_source_hash,
-       created_at, updated_at)
-
-price_history (id, game_id, checked_at, price_cents, original_price_cents,
-               currency, price_formatted, original_price_formatted, 
-               discount_text, raw_source_hash)
-  INDEX: (game_id, checked_at DESC)
-
-watches (id, game_id, email, target_price_cents, notify_on_any_drop,
-         enabled, last_notified_price_cents, last_notified_at,
-         created_at, updated_at)
-  INDEX: (game_id, enabled)
-
-notifications (id, watch_id, game_id, email, subject, body, status,
-               reason, error, created_at, sent_at)
-```
+**Core tables** (see `app/db/models.py` for full schema): `games`, `price_history`, `watches`, `notifications`, `users`, `sessions`, `passkey_credentials`, and related auth/catalog tables.
 
 ### 6. **EmailNotifier** (`notifier.py`)
 SMTP email sending with fallback logging:
@@ -151,7 +130,7 @@ Background async task:
 
 ### 8. **Configuration** (`config.py`)
 Pydantic settings from environment variables (prefix `PS_PRICE_`):
-- Database path
+- Database URL (`PS_PRICE_DATABASE_URL`)
 - Store origin + locale + user agent
 - Request timeout, min interval (rate limit), cache TTL, retry count
 - Check interval (scheduler polling period)
@@ -228,9 +207,9 @@ The implementation employs conservative strategies to avoid IP blocking:
 
 ## Testing
 
-- **Unit Tests** - Money conversion, HTML parsing, database operations
-- **Integration Tests** - API endpoints, service layer, database initialization
-- **Total Coverage** - 27 tests verifying all major paths
+- **Unit Tests** — Money conversion, HTML parsing, repository operations
+- **Integration Tests** — API endpoints, service layer, database initialization
+- **Total Coverage** — 56+ tests verifying major paths
 
 ## Deployment
 
@@ -242,17 +221,19 @@ docker compose up --build
 **Environment Variables:**
 - See `.env.example` for all configuration
 - Only `PS_PRICE_SMTP_*` and `PS_PRICE_NOTIFICATION_FROM_EMAIL` are optional
-- Database is persisted in Docker volume `ps-price-data`
+- PostgreSQL data is persisted in Docker volume `ps-price-pg`
 
 **Local Development:**
 ```bash
+# Start Postgres (Docker or local install), then:
 source .venv/bin/activate
+cd backend && alembic upgrade head
 uvicorn backend.app.main:app --reload --port 8000
 ```
 
-## Future: Frontend Integration
+## Frontend
 
-The Next.js frontend will:
+The Next.js frontend:
 1. Call `/api/search` to find games
 2. Call `POST /api/games` to track games
 3. Call `POST /api/watches` to create price watches

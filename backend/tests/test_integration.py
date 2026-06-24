@@ -8,72 +8,11 @@ These tests verify that the entire system works end-to-end:
 """
 
 import json
-import tempfile
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from backend.app.auth_repository import AuthRepository
-from backend.app.auth_service import AuthService
-from backend.app.config import Settings
-from backend.app.database import Database
-from backend.app.main import app, AppState
-from backend.app.notifier import EmailNotifier
-from backend.app.ps_store import PlayStationStoreClient
-from backend.app.repository import Repository
-from backend.app.rate_limit import rate_limiter
-from backend.app.scheduler import PriceScheduler
-from backend.app.service import PriceService
-
-
-@pytest.fixture
-def temp_db():
-    """Create a temporary database for testing."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = Path(tmpdir) / "test.sqlite3"
-        db = Database(str(db_path))
-        db.migrate()
-        yield db
-
-
-@pytest.fixture
-def settings(temp_db):
-    """Create test settings using a temporary database."""
-    return Settings(
-        database_path=str(temp_db.path),
-        scheduler_enabled=False,
-        cors_origins="*",
-        require_email_verification=False,
-        admin_emails="tester@example.com",
-        jwt_secret="test-jwt-secret-must-be-at-least-32-chars",
-        internal_api_key="",
-    )
-
-
-@pytest.fixture
-def client(temp_db, settings):
-    """Create a test client with temporary database and services."""
-    repo = Repository(temp_db)
-    auth_repo = AuthRepository(temp_db)
-    store_client = PlayStationStoreClient(settings)
-    notifier = EmailNotifier(settings, repo)
-    auth_service = AuthService(settings, auth_repo, repo, notifier)
-    service = PriceService(settings, repo, store_client, notifier, auth_service)
-    scheduler = PriceScheduler(settings, service)
-
-    app.state.settings = settings
-    app.state.db = temp_db
-    app.state.repo = repo
-    app.state.auth_repo = auth_repo
-    app.state.auth_service = auth_service
-    app.state.store_client = store_client
-    app.state.notifier = notifier
-    app.state.service = service
-    app.state.scheduler = scheduler
-
-    rate_limiter.reset()
-    return TestClient(app)
+from backend.app.main import app
 
 
 @pytest.fixture

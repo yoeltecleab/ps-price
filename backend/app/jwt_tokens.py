@@ -6,7 +6,7 @@ request (for access tokens). We use **two** token types:
 - **Access token** — short-lived; sent on each API call (cookie or Bearer header).
   Contains user id, email-verified flag, and a ``ver`` (token version) claim.
 - **Refresh token** — long-lived; used only to obtain a new access token.
-  Its ``jti`` (unique id) is stored in SQLite so logout/password change can revoke it.
+  Its ``jti`` (unique id) is stored in PostgreSQL so logout/password change can revoke it.
 
 Both are signed with ``PS_PRICE_JWT_SECRET`` using HS256.
 """

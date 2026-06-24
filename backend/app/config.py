@@ -3,7 +3,7 @@
 This module is the **control panel** for the whole backend. Instead of hard-
 coding paths, URLs, and secrets in many files, we read them once from:
 
-  1. Environment variables starting with ``PS_PRICE_`` (e.g. ``PS_PRICE_DATABASE_PATH``)
+  1. Environment variables starting with ``PS_PRICE_`` (e.g. ``PS_PRICE_DATABASE_URL``)
   2. An optional ``.env`` file in the project root (for local development)
 
 Pydantic's ``BaseSettings`` validates types automatically — if you set
@@ -13,7 +13,7 @@ Typical usage::
 
     from backend.app.config import get_settings
     settings = get_settings()
-    print(settings.database_path)
+    print(settings.database_url)
 
 ``get_settings()`` is cached (``@lru_cache``) so we only parse the environment once.
 """
@@ -46,8 +46,7 @@ class Settings(BaseSettings):
 
     # --- General app ---
     app_name: str = "PS Price"
-    database_path: str = "backend/data/ps_price.sqlite3"
-    database_url: str | None = None  # e.g. postgresql://user:pass@host:5432/psprice
+    database_url: str = "postgresql+psycopg://psprice:psprice@localhost:5432/psprice"
 
     # --- PlayStation Store HTTP client ---
     store_origin: str = "https://store.playstation.com"
@@ -126,7 +125,7 @@ class Settings(BaseSettings):
         """
         if not self.production_mode:
             return
-        if not self.database_url:
+        if not self.database_url or not self.database_url.strip():
             raise RuntimeError("PS_PRICE_DATABASE_URL must be set when PS_PRICE_PRODUCTION_MODE=true")
         if not self.cookie_secure:
             raise RuntimeError("PS_PRICE_COOKIE_SECURE must be true when PS_PRICE_PRODUCTION_MODE=true")

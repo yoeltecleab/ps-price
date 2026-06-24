@@ -6,7 +6,7 @@ Think of the backend as three layers that talk to each other:
 
 1. ``auth_routes.py`` — HTTP endpoints (what the browser calls).
 2. ``auth_service.py`` — business rules (validation, emails, passkey crypto).
-3. **This file** — SQL reads and writes (how data is stored in SQLite).
+3. **This file** — SQL reads and writes (how data is stored in PostgreSQL).
 
 Read in that order if you are learning the login flow top-to-bottom.
 This file never decides *whether* an action is allowed; it only runs queries
@@ -17,7 +17,7 @@ and returns rows as Python dictionaries.
 - Passwords arrive already hashed from ``passwords.py`` — we never store plain text.
 - Session and email tokens are hashed before INSERT; the raw token is returned once
   to the caller so it can go in a cookie or email link.
-- Writes use ``self.db._lock`` so two requests do not corrupt the same rows at once.
+- Writes use ``self.db.session()`` so concurrent requests share a thread-safe session.
 """
 
 from __future__ import annotations
@@ -25,9 +25,25 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
 from backend.app.auth_tokens import hash_token, new_token
-from backend.app.database import Database, row_to_dict
-from backend.app.repository import utc_now_iso
+from backend.app.database import Database
+from backend.app.db.models import (
+    CatalogMeta,
+    EmailVerificationToken,
+    PasskeyCredential,
+    PasswordResetToken,
+    RefreshSession,
+    User,
+    UserLibrary,
+    UserNotificationEmail,
+    Watch,
+    WebAuthnChallenge,
+)
+from backend.app.db.session import row_to_dict
+from backend.app.db.util import as_dict, utc_now_iso
 
 
 class AuthRepository:
@@ -42,7 +58,7 @@ class AuthRepository:
         """Store a shared ``Database`` wrapper used for every query.
 
         Args:
-            db: App-wide database helper (connection + lock).
+            db: App-wide database helper (engine + session factory).
         """
         self.db = db
 
@@ -75,39 +91,29 @@ class AuthRepository:
         """
         now = utc_now_iso()
         normalized = email.strip().lower()
-        # ``with self.db._lock`` = only one writer at a time for this database.
-        # ``?`` placeholders are parameterized queries — values are escaped safely.
-        with self.db._lock, self.db.connect() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO users (email, password_hash, display_name, email_verified_at, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    normalized,
-                    password_hash,
-                    display_name,
-                    now if email_verified else None,
-                    now,
-                    now,
-                ),
+        with self.db.session() as session:
+            user = User(
+                email=normalized,
+                password_hash=password_hash,
+                display_name=display_name,
+                email_verified_at=now if email_verified else None,
+                created_at=now,
+                updated_at=now,
             )
-            user_id = cursor.lastrowid  # SQLite auto-increment id for the new row
-            # Every user gets a "Primary" notification email row (for price alerts).
-            conn.execute(
-                """
-                INSERT INTO user_notification_emails (user_id, email, label, verified_at, is_primary, created_at)
-                VALUES (?, ?, ?, ?, 1, ?)
-                """,
-                (
-                    user_id,
-                    normalized,
-                    "Primary",
-                    now if email_verified else None,
-                    now,
-                ),
+            session.add(user)
+            session.flush()
+            session.add(
+                UserNotificationEmail(
+                    user_id=user.id,
+                    email=normalized,
+                    label="Primary",
+                    verified_at=now if email_verified else None,
+                    is_primary=1,
+                    created_at=now,
+                )
             )
-            return dict(conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone())
+            session.flush()
+            return as_dict(user)
 
     def get_user_by_id(self, user_id: int) -> dict | None:
         """Fetch one user by primary key.
@@ -118,14 +124,11 @@ class AuthRepository:
         Returns:
             User dict, or ``None`` if no row exists.
         """
-        with self.db.connect() as conn:
-            return row_to_dict(conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone())
+        with self.db.session() as session:
+            return row_to_dict(session.get(User, user_id))
 
     def get_user_by_email(self, email: str) -> dict | None:
         """Fetch one user by email address (case-insensitive).
-
-        ``COLLATE NOCASE`` tells SQLite to compare emails without caring about
-        upper vs lower case.
 
         Args:
             email: Address to look up (normalized before query).
@@ -133,13 +136,12 @@ class AuthRepository:
         Returns:
             User dict, or ``None`` if not found.
         """
-        with self.db.connect() as conn:
-            return row_to_dict(
-                conn.execute(
-                    "SELECT * FROM users WHERE email = ? COLLATE NOCASE",
-                    (email.strip().lower(),),
-                ).fetchone()
-            )
+        normalized = email.strip().lower()
+        with self.db.session() as session:
+            user = session.execute(
+                select(User).where(User.email == normalized)
+            ).scalar_one_or_none()
+            return as_dict(user)
 
     def update_user_password(self, user_id: int, password_hash: str) -> None:
         """Replace the stored password hash for a user.
@@ -149,10 +151,11 @@ class AuthRepository:
             password_hash: New hash from ``hash_password()`` — never plain text.
         """
         now = utc_now_iso()
-        with self.db._lock, self.db.connect() as conn:
-            conn.execute(
-                "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
-                (password_hash, now, user_id),
+        with self.db.session() as session:
+            session.execute(
+                update(User)
+                .where(User.id == user_id)
+                .values(password_hash=password_hash, updated_at=now)
             )
 
     def update_user_profile(
@@ -166,18 +169,20 @@ class AuthRepository:
     ) -> dict | None:
         """Change display name and/or preferred email theme."""
         now = utc_now_iso()
-        with self.db._lock, self.db.connect() as conn:
+        with self.db.session() as session:
             if update_display_name:
-                conn.execute(
-                    "UPDATE users SET display_name = ?, updated_at = ? WHERE id = ?",
-                    (display_name, now, user_id),
+                session.execute(
+                    update(User)
+                    .where(User.id == user_id)
+                    .values(display_name=display_name, updated_at=now)
                 )
             if update_theme:
-                conn.execute(
-                    "UPDATE users SET preferred_theme_id = ?, updated_at = ? WHERE id = ?",
-                    (preferred_theme_id, now, user_id),
+                session.execute(
+                    update(User)
+                    .where(User.id == user_id)
+                    .values(preferred_theme_id=preferred_theme_id, updated_at=now)
                 )
-            return row_to_dict(conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone())
+            return row_to_dict(session.get(User, user_id))
 
     def mark_email_verified(self, user_id: int) -> None:
         """Set verification timestamps on the user and matching primary email row.
@@ -185,20 +190,21 @@ class AuthRepository:
         Called after a valid email-verification token is consumed.
         """
         now = utc_now_iso()
-        with self.db._lock, self.db.connect() as conn:
-            conn.execute(
-                "UPDATE users SET email_verified_at = ?, updated_at = ? WHERE id = ?",
-                (now, now, user_id),
+        with self.db.session() as session:
+            session.execute(
+                update(User)
+                .where(User.id == user_id)
+                .values(email_verified_at=now, updated_at=now)
             )
-            user = conn.execute("SELECT email FROM users WHERE id = ?", (user_id,)).fetchone()
+            user = session.get(User, user_id)
             if user:
-                conn.execute(
-                    """
-                    UPDATE user_notification_emails
-                    SET verified_at = ?
-                    WHERE user_id = ? AND email = ? COLLATE NOCASE
-                    """,
-                    (now, user_id, user["email"]),
+                session.execute(
+                    update(UserNotificationEmail)
+                    .where(
+                        UserNotificationEmail.user_id == user_id,
+                        UserNotificationEmail.email == user.email,
+                    )
+                    .values(verified_at=now)
                 )
 
     # -------------------------------------------------------------------------
@@ -221,53 +227,68 @@ class AuthRepository:
         now = datetime.now(UTC)
         expires = (now + timedelta(days=ttl_days)).isoformat()
         created = now.isoformat()
-        with self.db._lock, self.db.connect() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO sessions (user_id, token_hash, expires_at, created_at, user_agent, ip_address)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (user_id, hash_token(jti), expires, created, user_agent, ip_address),
+        with self.db.session() as session:
+            refresh_session = RefreshSession(
+                user_id=user_id,
+                token_hash=hash_token(jti),
+                expires_at=expires,
+                created_at=created,
+                user_agent=user_agent,
+                ip_address=ip_address,
             )
-            return dict(
-                conn.execute("SELECT * FROM sessions WHERE id = ?", (cursor.lastrowid,)).fetchone()
-            )
+            session.add(refresh_session)
+            session.flush()
+            return as_dict(refresh_session)
 
     def get_refresh_session_by_jti(self, jti: str) -> dict | None:
         """Return session row if refresh ``jti`` is valid and not expired."""
-        with self.db.connect() as conn:
-            row = conn.execute(
-                """
-                SELECT s.*, u.email, u.display_name, u.email_verified_at, u.password_hash, u.token_version
-                FROM sessions s
-                JOIN users u ON u.id = s.user_id
-                WHERE s.token_hash = ? AND s.expires_at > ?
-                """,
-                (hash_token(jti), utc_now_iso()),
-            ).fetchone()
-            return dict(row) if row else None
+        with self.db.session() as session:
+            stmt = (
+                select(
+                    RefreshSession.id,
+                    RefreshSession.user_id,
+                    RefreshSession.token_hash,
+                    RefreshSession.expires_at,
+                    RefreshSession.created_at,
+                    RefreshSession.user_agent,
+                    RefreshSession.ip_address,
+                    User.email,
+                    User.display_name,
+                    User.email_verified_at,
+                    User.password_hash,
+                    User.token_version,
+                )
+                .join(User, User.id == RefreshSession.user_id)
+                .where(
+                    RefreshSession.token_hash == hash_token(jti),
+                    RefreshSession.expires_at > utc_now_iso(),
+                )
+            )
+            return as_dict(session.execute(stmt).mappings().first())
 
     def delete_refresh_session_by_jti(self, jti: str) -> None:
         """Revoke one refresh token (logout)."""
-        with self.db._lock, self.db.connect() as conn:
-            conn.execute("DELETE FROM sessions WHERE token_hash = ?", (hash_token(jti),))
+        with self.db.session() as session:
+            session.execute(
+                delete(RefreshSession).where(RefreshSession.token_hash == hash_token(jti))
+            )
 
     def delete_user_sessions(self, user_id: int) -> None:
         """Remove every refresh session for a user (e.g. after password change)."""
-        with self.db._lock, self.db.connect() as conn:
-            conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        with self.db.session() as session:
+            session.execute(delete(RefreshSession).where(RefreshSession.user_id == user_id))
 
     def bump_token_version(self, user_id: int) -> None:
         """Invalidate outstanding access JWTs after password change or reset."""
         now = utc_now_iso()
-        with self.db._lock, self.db.connect() as conn:
-            conn.execute(
-                """
-                UPDATE users
-                SET token_version = COALESCE(token_version, 0) + 1, updated_at = ?
-                WHERE id = ?
-                """,
-                (now, user_id),
+        with self.db.session() as session:
+            session.execute(
+                update(User)
+                .where(User.id == user_id)
+                .values(
+                    token_version=func.coalesce(User.token_version, 0) + 1,
+                    updated_at=now,
+                )
             )
 
     # -------------------------------------------------------------------------
@@ -289,14 +310,17 @@ class AuthRepository:
         token = new_token()
         now = datetime.now(UTC)
         expires = (now + timedelta(hours=ttl_hours)).isoformat()
-        with self.db._lock, self.db.connect() as conn:
-            conn.execute("DELETE FROM email_verification_tokens WHERE user_id = ?", (user_id,))
-            conn.execute(
-                """
-                INSERT INTO email_verification_tokens (user_id, token_hash, expires_at, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (user_id, hash_token(token), expires, now.isoformat()),
+        with self.db.session() as session:
+            session.execute(
+                delete(EmailVerificationToken).where(EmailVerificationToken.user_id == user_id)
+            )
+            session.add(
+                EmailVerificationToken(
+                    user_id=user_id,
+                    token_hash=hash_token(token),
+                    expires_at=expires,
+                    created_at=now.isoformat(),
+                )
             )
         return token
 
@@ -312,21 +336,18 @@ class AuthRepository:
         Returns:
             Token row dict (includes ``user_id``), or ``None`` if bad/expired.
         """
-        with self.db._lock, self.db.connect() as conn:
-            row = conn.execute(
-                """
-                SELECT * FROM email_verification_tokens
-                WHERE token_hash = ? AND expires_at > ?
-                """,
-                (hash_token(token), utc_now_iso()),
-            ).fetchone()
-            if not row:
+        with self.db.session() as session:
+            row = session.execute(
+                select(EmailVerificationToken).where(
+                    EmailVerificationToken.token_hash == hash_token(token),
+                    EmailVerificationToken.expires_at > utc_now_iso(),
+                )
+            ).scalar_one_or_none()
+            if row is None:
                 return None
-            conn.execute(
-                "DELETE FROM email_verification_tokens WHERE id = ?",
-                (row["id"],),
-            )
-            return dict(row)
+            data = as_dict(row)
+            session.delete(row)
+            return data
 
     # -------------------------------------------------------------------------
     # Password reset — short-lived tokens in ``password_reset_tokens``
@@ -345,14 +366,17 @@ class AuthRepository:
         token = new_token()
         now = datetime.now(UTC)
         expires = (now + timedelta(hours=ttl_hours)).isoformat()
-        with self.db._lock, self.db.connect() as conn:
-            conn.execute("DELETE FROM password_reset_tokens WHERE user_id = ?", (user_id,))
-            conn.execute(
-                """
-                INSERT INTO password_reset_tokens (user_id, token_hash, expires_at, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (user_id, hash_token(token), expires, now.isoformat()),
+        with self.db.session() as session:
+            session.execute(
+                delete(PasswordResetToken).where(PasswordResetToken.user_id == user_id)
+            )
+            session.add(
+                PasswordResetToken(
+                    user_id=user_id,
+                    token_hash=hash_token(token),
+                    expires_at=expires,
+                    created_at=now.isoformat(),
+                )
             )
         return token
 
@@ -365,18 +389,18 @@ class AuthRepository:
         Returns:
             Token row dict, or ``None`` if invalid or expired.
         """
-        with self.db._lock, self.db.connect() as conn:
-            row = conn.execute(
-                """
-                SELECT * FROM password_reset_tokens
-                WHERE token_hash = ? AND expires_at > ?
-                """,
-                (hash_token(token), utc_now_iso()),
-            ).fetchone()
-            if not row:
+        with self.db.session() as session:
+            row = session.execute(
+                select(PasswordResetToken).where(
+                    PasswordResetToken.token_hash == hash_token(token),
+                    PasswordResetToken.expires_at > utc_now_iso(),
+                )
+            ).scalar_one_or_none()
+            if row is None:
                 return None
-            conn.execute("DELETE FROM password_reset_tokens WHERE id = ?", (row["id"],))
-            return dict(row)
+            data = as_dict(row)
+            session.delete(row)
+            return data
 
     # -------------------------------------------------------------------------
     # Notification emails — extra addresses for price alerts
@@ -387,49 +411,44 @@ class AuthRepository:
 
         ``ORDER BY is_primary DESC`` puts the main address at the top.
         """
-        with self.db.connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM user_notification_emails
-                WHERE user_id = ?
-                ORDER BY is_primary DESC, created_at ASC
-                """,
-                (user_id,),
-            ).fetchall()
-            return [dict(row) for row in rows]
+        with self.db.session() as session:
+            rows = session.execute(
+                select(UserNotificationEmail)
+                .where(UserNotificationEmail.user_id == user_id)
+                .order_by(
+                    UserNotificationEmail.is_primary.desc(),
+                    UserNotificationEmail.created_at.asc(),
+                )
+            ).scalars().all()
+            return [as_dict(row) for row in rows]
 
     def get_notification_email_by_id(self, email_id: int) -> dict | None:
         """Fetch a notification email by id (no user check — use with care)."""
-        with self.db.connect() as conn:
-            return row_to_dict(
-                conn.execute(
-                    "SELECT * FROM user_notification_emails WHERE id = ?",
-                    (email_id,),
-                ).fetchone()
-            )
+        with self.db.session() as session:
+            return row_to_dict(session.get(UserNotificationEmail, email_id))
 
     def get_notification_email(self, email_id: int, user_id: int) -> dict | None:
         """Fetch a notification email only if it belongs to ``user_id``."""
-        with self.db.connect() as conn:
-            return row_to_dict(
-                conn.execute(
-                    "SELECT * FROM user_notification_emails WHERE id = ? AND user_id = ?",
-                    (email_id, user_id),
-                ).fetchone()
-            )
+        with self.db.session() as session:
+            row = session.execute(
+                select(UserNotificationEmail).where(
+                    UserNotificationEmail.id == email_id,
+                    UserNotificationEmail.user_id == user_id,
+                )
+            ).scalar_one_or_none()
+            return as_dict(row)
 
     def get_notification_email_by_address(self, user_id: int, email: str) -> dict | None:
         """Find a notification row by address for one user (case-insensitive)."""
-        with self.db.connect() as conn:
-            return row_to_dict(
-                conn.execute(
-                    """
-                    SELECT * FROM user_notification_emails
-                    WHERE user_id = ? AND email = ? COLLATE NOCASE
-                    """,
-                    (user_id, email.strip().lower()),
-                ).fetchone()
-            )
+        normalized = email.strip().lower()
+        with self.db.session() as session:
+            row = session.execute(
+                select(UserNotificationEmail).where(
+                    UserNotificationEmail.user_id == user_id,
+                    UserNotificationEmail.email == normalized,
+                )
+            ).scalar_one_or_none()
+            return as_dict(row)
 
     def add_notification_email(
         self, user_id: int, email: str, *, label: str | None = None
@@ -446,20 +465,18 @@ class AuthRepository:
         """
         now = utc_now_iso()
         normalized = email.strip().lower()
-        with self.db._lock, self.db.connect() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO user_notification_emails (user_id, email, label, verified_at, is_primary, created_at)
-                VALUES (?, ?, ?, NULL, 0, ?)
-                """,
-                (user_id, normalized, label, now),
+        with self.db.session() as session:
+            notification_email = UserNotificationEmail(
+                user_id=user_id,
+                email=normalized,
+                label=label,
+                verified_at=None,
+                is_primary=0,
+                created_at=now,
             )
-            return dict(
-                conn.execute(
-                    "SELECT * FROM user_notification_emails WHERE id = ?",
-                    (cursor.lastrowid,),
-                ).fetchone()
-            )
+            session.add(notification_email)
+            session.flush()
+            return as_dict(notification_email)
 
     def verify_notification_email(self, email_id: int, user_id: int) -> dict | None:
         """Mark one notification address as verified.
@@ -468,46 +485,49 @@ class AuthRepository:
             Updated row, or ``None`` if id/user mismatch.
         """
         now = utc_now_iso()
-        with self.db._lock, self.db.connect() as conn:
-            conn.execute(
-                """
-                UPDATE user_notification_emails
-                SET verified_at = ?
-                WHERE id = ? AND user_id = ?
-                """,
-                (now, email_id, user_id),
+        with self.db.session() as session:
+            session.execute(
+                update(UserNotificationEmail)
+                .where(
+                    UserNotificationEmail.id == email_id,
+                    UserNotificationEmail.user_id == user_id,
+                )
+                .values(verified_at=now)
             )
-            return row_to_dict(
-                conn.execute(
-                    "SELECT * FROM user_notification_emails WHERE id = ? AND user_id = ?",
-                    (email_id, user_id),
-                ).fetchone()
-            )
+            row = session.execute(
+                select(UserNotificationEmail).where(
+                    UserNotificationEmail.id == email_id,
+                    UserNotificationEmail.user_id == user_id,
+                )
+            ).scalar_one_or_none()
+            return as_dict(row)
 
     def set_primary_notification_email(self, email_id: int, user_id: int) -> dict | None:
         """Make one verified email primary; clears ``is_primary`` on all others.
 
         Two UPDATEs: first zero out every row for the user, then set the chosen one.
         """
-        with self.db._lock, self.db.connect() as conn:
-            conn.execute(
-                "UPDATE user_notification_emails SET is_primary = 0 WHERE user_id = ?",
-                (user_id,),
+        with self.db.session() as session:
+            session.execute(
+                update(UserNotificationEmail)
+                .where(UserNotificationEmail.user_id == user_id)
+                .values(is_primary=0)
             )
-            conn.execute(
-                """
-                UPDATE user_notification_emails
-                SET is_primary = 1
-                WHERE id = ? AND user_id = ?
-                """,
-                (email_id, user_id),
+            session.execute(
+                update(UserNotificationEmail)
+                .where(
+                    UserNotificationEmail.id == email_id,
+                    UserNotificationEmail.user_id == user_id,
+                )
+                .values(is_primary=1)
             )
-            return row_to_dict(
-                conn.execute(
-                    "SELECT * FROM user_notification_emails WHERE id = ? AND user_id = ?",
-                    (email_id, user_id),
-                ).fetchone()
-            )
+            row = session.execute(
+                select(UserNotificationEmail).where(
+                    UserNotificationEmail.id == email_id,
+                    UserNotificationEmail.user_id == user_id,
+                )
+            ).scalar_one_or_none()
+            return as_dict(row)
 
     def delete_notification_email(self, email_id: int, user_id: int) -> bool:
         """Delete a non-primary notification email.
@@ -515,18 +535,22 @@ class AuthRepository:
         Returns:
             True if a row was deleted; False if missing or primary (protected).
         """
-        with self.db._lock, self.db.connect() as conn:
-            row = conn.execute(
-                "SELECT is_primary FROM user_notification_emails WHERE id = ? AND user_id = ?",
-                (email_id, user_id),
-            ).fetchone()
-            if not row or row["is_primary"]:
+        with self.db.session() as session:
+            row = session.execute(
+                select(UserNotificationEmail.is_primary).where(
+                    UserNotificationEmail.id == email_id,
+                    UserNotificationEmail.user_id == user_id,
+                )
+            ).first()
+            if row is None or row.is_primary:
                 return False
-            cursor = conn.execute(
-                "DELETE FROM user_notification_emails WHERE id = ? AND user_id = ?",
-                (email_id, user_id),
+            result = session.execute(
+                delete(UserNotificationEmail).where(
+                    UserNotificationEmail.id == email_id,
+                    UserNotificationEmail.user_id == user_id,
+                )
             )
-            return cursor.rowcount > 0
+            return result.rowcount > 0
 
     def create_notification_email_verification_token(
         self, email_id: int, *, ttl_hours: int = 48
@@ -543,15 +567,18 @@ class AuthRepository:
         now = datetime.now(UTC)
         expires = (now + timedelta(hours=ttl_hours)).isoformat()
         key = f"notify_email:{email_id}"
-        with self.db._lock, self.db.connect() as conn:
-            # ``ON CONFLICT DO UPDATE`` = upsert: insert or replace existing key.
-            conn.execute(
-                """
-                INSERT INTO catalog_meta (key, value, updated_at) VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-                """,
-                (key, json.dumps({"hash": hash_token(token), "expires": expires}), now.isoformat()),
+        value = json.dumps({"hash": hash_token(token), "expires": expires})
+        updated_at = now.isoformat()
+        with self.db.session() as session:
+            stmt = pg_insert(CatalogMeta).values(key=key, value=value, updated_at=updated_at)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[CatalogMeta.key],
+                set_={
+                    "value": stmt.excluded.value,
+                    "updated_at": stmt.excluded.updated_at,
+                },
             )
+            session.execute(stmt)
         return token
 
     def consume_notification_email_verification_token(
@@ -563,16 +590,18 @@ class AuthRepository:
             True if token matched and was not expired; False otherwise.
         """
         key = f"notify_email:{email_id}"
-        with self.db._lock, self.db.connect() as conn:
-            row = conn.execute("SELECT value FROM catalog_meta WHERE key = ?", (key,)).fetchone()
-            if not row:
+        with self.db.session() as session:
+            row = session.execute(
+                select(CatalogMeta.value).where(CatalogMeta.key == key)
+            ).first()
+            if row is None:
                 return False
-            payload = json.loads(row["value"])
+            payload = json.loads(row.value)
             if payload.get("expires", "") <= utc_now_iso():
                 return False
             if payload.get("hash") != hash_token(token):
                 return False
-            conn.execute("DELETE FROM catalog_meta WHERE key = ?", (key,))
+            session.execute(delete(CatalogMeta).where(CatalogMeta.key == key))
             return True
 
     # -------------------------------------------------------------------------
@@ -592,18 +621,18 @@ class AuthRepository:
         """
         now = datetime.now(UTC)
         expires = (now + timedelta(minutes=ttl_minutes)).isoformat()
-        with self.db._lock, self.db.connect() as conn:
-            # Housekeeping: remove expired challenges before inserting.
-            conn.execute(
-                "DELETE FROM webauthn_challenges WHERE expires_at <= ?",
-                (utc_now_iso(),),
+        with self.db.session() as session:
+            session.execute(
+                delete(WebAuthnChallenge).where(WebAuthnChallenge.expires_at <= utc_now_iso())
             )
-            conn.execute(
-                """
-                INSERT INTO webauthn_challenges (challenge, user_id, purpose, expires_at, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (challenge, user_id, purpose, expires, now.isoformat()),
+            session.add(
+                WebAuthnChallenge(
+                    challenge=challenge,
+                    user_id=user_id,
+                    purpose=purpose,
+                    expires_at=expires,
+                    created_at=now.isoformat(),
+                )
             )
 
     def pop_webauthn_challenge(self, challenge: str, purpose: str) -> dict | None:
@@ -614,30 +643,31 @@ class AuthRepository:
         Returns:
             Challenge row dict, or ``None`` if missing/expired/wrong purpose.
         """
-        with self.db._lock, self.db.connect() as conn:
-            row = conn.execute(
-                """
-                SELECT * FROM webauthn_challenges
-                WHERE challenge = ? AND purpose = ? AND expires_at > ?
-                """,
-                (challenge, purpose, utc_now_iso()),
-            ).fetchone()
-            if not row:
+        with self.db.session() as session:
+            row = session.execute(
+                select(WebAuthnChallenge).where(
+                    WebAuthnChallenge.challenge == challenge,
+                    WebAuthnChallenge.purpose == purpose,
+                    WebAuthnChallenge.expires_at > utc_now_iso(),
+                )
+            ).scalar_one_or_none()
+            if row is None:
                 return None
-            conn.execute("DELETE FROM webauthn_challenges WHERE id = ?", (row["id"],))
-            return dict(row)
+            data = as_dict(row)
+            session.delete(row)
+            return data
 
     def peek_webauthn_challenge(self, challenge: str, purpose: str) -> dict | None:
         """Return a challenge row without consuming it (signup finish needs user id first)."""
-        with self.db.connect() as conn:
-            row = conn.execute(
-                """
-                SELECT * FROM webauthn_challenges
-                WHERE challenge = ? AND purpose = ? AND expires_at > ?
-                """,
-                (challenge, purpose, utc_now_iso()),
-            ).fetchone()
-            return dict(row) if row else None
+        with self.db.session() as session:
+            row = session.execute(
+                select(WebAuthnChallenge).where(
+                    WebAuthnChallenge.challenge == challenge,
+                    WebAuthnChallenge.purpose == purpose,
+                    WebAuthnChallenge.expires_at > utc_now_iso(),
+                )
+            ).scalar_one_or_none()
+            return as_dict(row)
 
     # -------------------------------------------------------------------------
     # Passkeys — WebAuthn credentials in ``passkey_credentials``
@@ -661,64 +691,65 @@ class AuthRepository:
             Full passkey row including database ``id``.
         """
         now = utc_now_iso()
-        with self.db._lock, self.db.connect() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO passkey_credentials (
-                    user_id, credential_id, public_key, sign_count, transports,
-                    friendly_name, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    user_id,
-                    credential_id,
-                    public_key,
-                    sign_count,
-                    json.dumps(transports or []),
-                    friendly_name,
-                    now,
-                ),
+        with self.db.session() as session:
+            passkey = PasskeyCredential(
+                user_id=user_id,
+                credential_id=credential_id,
+                public_key=public_key,
+                sign_count=sign_count,
+                transports=json.dumps(transports or []),
+                friendly_name=friendly_name,
+                created_at=now,
             )
-            return dict(
-                conn.execute(
-                    "SELECT * FROM passkey_credentials WHERE id = ?",
-                    (cursor.lastrowid,),
-                ).fetchone()
+            session.add(passkey)
+            session.flush()
+            return as_dict(passkey)
+
+    def list_passkey_credential_ids(self, user_id: int) -> list[bytes]:
+        """Return raw credential ids for WebAuthn allow/exclude lists."""
+        with self.db.session() as session:
+            return list(
+                session.scalars(
+                    select(PasskeyCredential.credential_id).where(
+                        PasskeyCredential.user_id == user_id
+                    )
+                )
             )
 
     def list_passkeys(self, user_id: int) -> list[dict]:
         """List passkey metadata for account settings (no secret key material in SELECT)."""
-        with self.db.connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, user_id, sign_count, transports, friendly_name, created_at, last_used_at
-                FROM passkey_credentials WHERE user_id = ?
-                ORDER BY created_at DESC
-                """,
-                (user_id,),
-            ).fetchall()
+        with self.db.session() as session:
+            rows = session.execute(
+                select(
+                    PasskeyCredential.id,
+                    PasskeyCredential.user_id,
+                    PasskeyCredential.sign_count,
+                    PasskeyCredential.transports,
+                    PasskeyCredential.friendly_name,
+                    PasskeyCredential.created_at,
+                    PasskeyCredential.last_used_at,
+                )
+                .where(PasskeyCredential.user_id == user_id)
+                .order_by(PasskeyCredential.created_at.desc())
+            ).mappings().all()
             return [dict(row) for row in rows]
 
     def get_passkey_by_credential_id(self, credential_id: bytes) -> dict | None:
         """Look up a passkey by the credential id from the browser's assertion."""
-        with self.db.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM passkey_credentials WHERE credential_id = ?",
-                (credential_id,),
-            ).fetchone()
-            return dict(row) if row else None
+        with self.db.session() as session:
+            row = session.execute(
+                select(PasskeyCredential).where(PasskeyCredential.credential_id == credential_id)
+            ).scalar_one_or_none()
+            return as_dict(row)
 
     def update_passkey_sign_count(self, passkey_id: int, sign_count: int) -> None:
         """Update signature counter after successful login (detects cloned keys)."""
         now = utc_now_iso()
-        with self.db._lock, self.db.connect() as conn:
-            conn.execute(
-                """
-                UPDATE passkey_credentials
-                SET sign_count = ?, last_used_at = ?
-                WHERE id = ?
-                """,
-                (sign_count, now, passkey_id),
+        with self.db.session() as session:
+            session.execute(
+                update(PasskeyCredential)
+                .where(PasskeyCredential.id == passkey_id)
+                .values(sign_count=sign_count, last_used_at=now)
             )
 
     def delete_passkey(self, passkey_id: int, user_id: int) -> bool:
@@ -727,42 +758,45 @@ class AuthRepository:
         Returns:
             True if a row was deleted.
         """
-        with self.db._lock, self.db.connect() as conn:
-            cursor = conn.execute(
-                "DELETE FROM passkey_credentials WHERE id = ? AND user_id = ?",
-                (passkey_id, user_id),
+        with self.db.session() as session:
+            result = session.execute(
+                delete(PasskeyCredential).where(
+                    PasskeyCredential.id == passkey_id,
+                    PasskeyCredential.user_id == user_id,
+                )
             )
-            return cursor.rowcount > 0
+            return result.rowcount > 0
 
     def delete_all_passkeys(self, user_id: int) -> int:
         """Remove every passkey for a user (e.g. switching to password-only sign-in)."""
-        with self.db._lock, self.db.connect() as conn:
-            cursor = conn.execute(
-                "DELETE FROM passkey_credentials WHERE user_id = ?",
-                (user_id,),
+        with self.db.session() as session:
+            result = session.execute(
+                delete(PasskeyCredential).where(PasskeyCredential.user_id == user_id)
             )
-            return cursor.rowcount
+            return result.rowcount
 
     def delete_user(self, user_id: int) -> bool:
         """Permanently delete a user account and cascaded auth data."""
-        with self.db._lock, self.db.connect() as conn:
-            cursor = conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
-            return cursor.rowcount > 0
+        with self.db.session() as session:
+            result = session.execute(delete(User).where(User.id == user_id))
+            return result.rowcount > 0
 
     def admin_user_stats(self) -> dict:
         """User counts for the admin dashboard."""
-        with self.db.connect() as conn:
-            total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-            verified = conn.execute(
-                "SELECT COUNT(*) FROM users WHERE email_verified_at IS NOT NULL"
-            ).fetchone()[0]
-            with_password = conn.execute(
-                "SELECT COUNT(*) FROM users WHERE password_hash IS NOT NULL"
-            ).fetchone()[0]
-            passkeys = conn.execute(
-                "SELECT COUNT(*) FROM passkey_credentials"
-            ).fetchone()[0]
-            sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        with self.db.session() as session:
+            total = session.execute(select(func.count()).select_from(User)).scalar_one()
+            verified = session.execute(
+                select(func.count()).select_from(User).where(User.email_verified_at.is_not(None))
+            ).scalar_one()
+            with_password = session.execute(
+                select(func.count()).select_from(User).where(User.password_hash.is_not(None))
+            ).scalar_one()
+            passkeys = session.execute(
+                select(func.count()).select_from(PasskeyCredential)
+            ).scalar_one()
+            sessions = session.execute(
+                select(func.count()).select_from(RefreshSession)
+            ).scalar_one()
         return {
             "total": total,
             "verified": verified,
@@ -778,34 +812,64 @@ class AuthRepository:
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[dict], int]:
-        where = ""
-        params: list[object] = []
-        if q and q.strip():
-            where = "WHERE u.email LIKE ? OR u.display_name LIKE ?"
-            pattern = f"%{q.strip()}%"
-            params.extend([pattern, pattern])
+        library_count_sq = (
+            select(func.count())
+            .select_from(UserLibrary)
+            .where(UserLibrary.user_id == User.id)
+            .correlate(User)
+            .scalar_subquery()
+        )
+        watch_count_sq = (
+            select(func.count())
+            .select_from(Watch)
+            .where(Watch.user_id == User.id)
+            .correlate(User)
+            .scalar_subquery()
+        )
+        passkey_count_sq = (
+            select(func.count())
+            .select_from(PasskeyCredential)
+            .where(PasskeyCredential.user_id == User.id)
+            .correlate(User)
+            .scalar_subquery()
+        )
         bounded = max(1, min(limit, 200))
-        with self.db.connect() as conn:
-            total = conn.execute(
-                f"SELECT COUNT(*) FROM users u {where}",
-                params,
-            ).fetchone()[0]
-            rows = conn.execute(
-                f"""
-                SELECT
-                    u.id, u.email, u.display_name, u.email_verified_at,
-                    u.created_at, u.updated_at,
-                    (SELECT COUNT(*) FROM user_library ul WHERE ul.user_id = u.id) AS library_count,
-                    (SELECT COUNT(*) FROM watches w WHERE w.user_id = u.id) AS watch_count,
-                    (SELECT COUNT(*) FROM passkey_credentials p WHERE p.user_id = u.id) AS passkey_count,
-                    (u.password_hash IS NOT NULL) AS has_password
-                FROM users u
-                {where}
-                ORDER BY u.created_at DESC
-                LIMIT ? OFFSET ?
-                """,
-                (*params, bounded, max(0, offset)),
-            ).fetchall()
+        page_offset = max(0, offset)
+
+        filters = []
+        if q and q.strip():
+            pattern = f"%{q.strip()}%"
+            filters.append(
+                or_(User.email.ilike(pattern), User.display_name.ilike(pattern))
+            )
+
+        with self.db.session() as session:
+            count_stmt = select(func.count()).select_from(User)
+            if filters:
+                count_stmt = count_stmt.where(*filters)
+            total = session.execute(count_stmt).scalar_one()
+
+            stmt = (
+                select(
+                    User.id,
+                    User.email,
+                    User.display_name,
+                    User.email_verified_at,
+                    User.created_at,
+                    User.updated_at,
+                    library_count_sq.label("library_count"),
+                    watch_count_sq.label("watch_count"),
+                    passkey_count_sq.label("passkey_count"),
+                    (User.password_hash.is_not(None)).label("has_password"),
+                )
+                .order_by(User.created_at.desc())
+                .limit(bounded)
+                .offset(page_offset)
+            )
+            if filters:
+                stmt = stmt.where(*filters)
+            rows = session.execute(stmt).mappings().all()
+
             items = []
             for row in rows:
                 item = dict(row)
@@ -821,34 +885,40 @@ class AuthRepository:
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[dict], int]:
-        where = ""
-        params: list[object] = []
-        if q and q.strip():
-            where = "WHERE u.email LIKE ?"
-            params.append(f"%{q.strip()}%")
         bounded = max(1, min(limit, 200))
-        with self.db.connect() as conn:
-            total = conn.execute(
-                f"""
-                SELECT COUNT(*)
-                FROM sessions s
-                JOIN users u ON u.id = s.user_id
-                {where}
-                """,
-                params,
-            ).fetchone()[0]
-            rows = conn.execute(
-                f"""
-                SELECT s.id, s.user_id, s.expires_at, s.created_at, s.user_agent, s.ip_address,
-                       u.email AS user_email
-                FROM sessions s
-                JOIN users u ON u.id = s.user_id
-                {where}
-                ORDER BY s.created_at DESC
-                LIMIT ? OFFSET ?
-                """,
-                (*params, bounded, max(0, offset)),
-            ).fetchall()
+        page_offset = max(0, offset)
+        filters = []
+        if q and q.strip():
+            filters.append(User.email.ilike(f"%{q.strip()}%"))
+
+        with self.db.session() as session:
+            count_stmt = (
+                select(func.count())
+                .select_from(RefreshSession)
+                .join(User, User.id == RefreshSession.user_id)
+            )
+            if filters:
+                count_stmt = count_stmt.where(*filters)
+            total = session.execute(count_stmt).scalar_one()
+
+            stmt = (
+                select(
+                    RefreshSession.id,
+                    RefreshSession.user_id,
+                    RefreshSession.expires_at,
+                    RefreshSession.created_at,
+                    RefreshSession.user_agent,
+                    RefreshSession.ip_address,
+                    User.email.label("user_email"),
+                )
+                .join(User, User.id == RefreshSession.user_id)
+                .order_by(RefreshSession.created_at.desc())
+                .limit(bounded)
+                .offset(page_offset)
+            )
+            if filters:
+                stmt = stmt.where(*filters)
+            rows = session.execute(stmt).mappings().all()
             return [dict(row) for row in rows], total
 
     def list_passkeys_admin(
@@ -858,35 +928,44 @@ class AuthRepository:
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[dict], int]:
-        where = ""
-        params: list[object] = []
-        if q and q.strip():
-            where = "WHERE u.email LIKE ? OR p.friendly_name LIKE ?"
-            pattern = f"%{q.strip()}%"
-            params.extend([pattern, pattern])
         bounded = max(1, min(limit, 200))
-        with self.db.connect() as conn:
-            total = conn.execute(
-                f"""
-                SELECT COUNT(*)
-                FROM passkey_credentials p
-                JOIN users u ON u.id = p.user_id
-                {where}
-                """,
-                params,
-            ).fetchone()[0]
-            rows = conn.execute(
-                f"""
-                SELECT p.id, p.user_id, p.friendly_name, p.transports, p.sign_count,
-                       p.created_at, p.last_used_at, u.email AS user_email
-                FROM passkey_credentials p
-                JOIN users u ON u.id = p.user_id
-                {where}
-                ORDER BY p.created_at DESC
-                LIMIT ? OFFSET ?
-                """,
-                (*params, bounded, max(0, offset)),
-            ).fetchall()
+        page_offset = max(0, offset)
+        filters = []
+        if q and q.strip():
+            pattern = f"%{q.strip()}%"
+            filters.append(
+                or_(User.email.ilike(pattern), PasskeyCredential.friendly_name.ilike(pattern))
+            )
+
+        with self.db.session() as session:
+            count_stmt = (
+                select(func.count())
+                .select_from(PasskeyCredential)
+                .join(User, User.id == PasskeyCredential.user_id)
+            )
+            if filters:
+                count_stmt = count_stmt.where(*filters)
+            total = session.execute(count_stmt).scalar_one()
+
+            stmt = (
+                select(
+                    PasskeyCredential.id,
+                    PasskeyCredential.user_id,
+                    PasskeyCredential.friendly_name,
+                    PasskeyCredential.transports,
+                    PasskeyCredential.sign_count,
+                    PasskeyCredential.created_at,
+                    PasskeyCredential.last_used_at,
+                    User.email.label("user_email"),
+                )
+                .join(User, User.id == PasskeyCredential.user_id)
+                .order_by(PasskeyCredential.created_at.desc())
+                .limit(bounded)
+                .offset(page_offset)
+            )
+            if filters:
+                stmt = stmt.where(*filters)
+            rows = session.execute(stmt).mappings().all()
             return [dict(row) for row in rows], total
 
     def list_notification_emails_admin(
@@ -897,38 +976,50 @@ class AuthRepository:
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[dict], int]:
-        where: list[str] = []
-        params: list[object] = []
-        if verified_only:
-            where.append("e.verified_at IS NOT NULL")
-        if q and q.strip():
-            where.append("(e.email LIKE ? OR u.email LIKE ?)")
-            pattern = f"%{q.strip()}%"
-            params.extend([pattern, pattern])
-        suffix = f"WHERE {' AND '.join(where)}" if where else ""
         bounded = max(1, min(limit, 200))
-        with self.db.connect() as conn:
-            total = conn.execute(
-                f"""
-                SELECT COUNT(*)
-                FROM user_notification_emails e
-                JOIN users u ON u.id = e.user_id
-                {suffix}
-                """,
-                params,
-            ).fetchone()[0]
-            rows = conn.execute(
-                f"""
-                SELECT e.id, e.user_id, e.email, e.label, e.verified_at, e.is_primary,
-                       e.created_at, u.email AS user_email
-                FROM user_notification_emails e
-                JOIN users u ON u.id = e.user_id
-                {suffix}
-                ORDER BY e.created_at DESC
-                LIMIT ? OFFSET ?
-                """,
-                (*params, bounded, max(0, offset)),
-            ).fetchall()
+        page_offset = max(0, offset)
+        filters = []
+        if verified_only:
+            filters.append(UserNotificationEmail.verified_at.is_not(None))
+        if q and q.strip():
+            pattern = f"%{q.strip()}%"
+            filters.append(
+                or_(
+                    UserNotificationEmail.email.ilike(pattern),
+                    User.email.ilike(pattern),
+                )
+            )
+
+        with self.db.session() as session:
+            count_stmt = (
+                select(func.count())
+                .select_from(UserNotificationEmail)
+                .join(User, User.id == UserNotificationEmail.user_id)
+            )
+            if filters:
+                count_stmt = count_stmt.where(*filters)
+            total = session.execute(count_stmt).scalar_one()
+
+            stmt = (
+                select(
+                    UserNotificationEmail.id,
+                    UserNotificationEmail.user_id,
+                    UserNotificationEmail.email,
+                    UserNotificationEmail.label,
+                    UserNotificationEmail.verified_at,
+                    UserNotificationEmail.is_primary,
+                    UserNotificationEmail.created_at,
+                    User.email.label("user_email"),
+                )
+                .join(User, User.id == UserNotificationEmail.user_id)
+                .order_by(UserNotificationEmail.created_at.desc())
+                .limit(bounded)
+                .offset(page_offset)
+            )
+            if filters:
+                stmt = stmt.where(*filters)
+            rows = session.execute(stmt).mappings().all()
+
             items = []
             for row in rows:
                 item = dict(row)
@@ -938,17 +1029,18 @@ class AuthRepository:
             return items, total
 
     def admin_delete_passkey(self, passkey_id: int) -> bool:
-        with self.db._lock, self.db.connect() as conn:
-            cursor = conn.execute(
-                "DELETE FROM passkey_credentials WHERE id = ?",
-                (passkey_id,),
+        with self.db.session() as session:
+            result = session.execute(
+                delete(PasskeyCredential).where(PasskeyCredential.id == passkey_id)
             )
-            return cursor.rowcount > 0
+            return result.rowcount > 0
 
     def admin_revoke_user_sessions(self, user_id: int) -> int:
-        with self.db._lock, self.db.connect() as conn:
-            cursor = conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
-            return cursor.rowcount
+        with self.db.session() as session:
+            result = session.execute(
+                delete(RefreshSession).where(RefreshSession.user_id == user_id)
+            )
+            return result.rowcount
 
     # -------------------------------------------------------------------------
     # User library — which games a logged-in user has saved
@@ -957,17 +1049,17 @@ class AuthRepository:
     def add_to_library(self, user_id: int, game_id: int) -> None:
         """Add a game to the user's library (no-op if already present).
 
-        ``INSERT OR IGNORE`` skips the insert when the (user_id, game_id) pair exists.
+        ``ON CONFLICT DO NOTHING`` skips the insert when the (user_id, game_id) pair exists.
         """
         now = utc_now_iso()
-        with self.db._lock, self.db.connect() as conn:
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO user_library (user_id, game_id, created_at)
-                VALUES (?, ?, ?)
-                """,
-                (user_id, game_id, now),
+        with self.db.session() as session:
+            stmt = pg_insert(UserLibrary).values(
+                user_id=user_id,
+                game_id=game_id,
+                created_at=now,
             )
+            stmt = stmt.on_conflict_do_nothing(index_elements=["user_id", "game_id"])
+            session.execute(stmt)
 
     def remove_from_library(self, user_id: int, game_id: int) -> bool:
         """Remove a game from library and clear any price watches for that game.
@@ -975,31 +1067,33 @@ class AuthRepository:
         Returns:
             True if a library row was removed.
         """
-        with self.db._lock, self.db.connect() as conn:
-            conn.execute(
-                "DELETE FROM watches WHERE user_id = ? AND game_id = ?",
-                (user_id, game_id),
+        with self.db.session() as session:
+            session.execute(
+                delete(Watch).where(Watch.user_id == user_id, Watch.game_id == game_id)
             )
-            cursor = conn.execute(
-                "DELETE FROM user_library WHERE user_id = ? AND game_id = ?",
-                (user_id, game_id),
+            result = session.execute(
+                delete(UserLibrary).where(
+                    UserLibrary.user_id == user_id,
+                    UserLibrary.game_id == game_id,
+                )
             )
-            return cursor.rowcount > 0
+            return result.rowcount > 0
 
     def is_in_library(self, user_id: int, game_id: int) -> bool:
         """Return whether the user has saved this game."""
-        with self.db.connect() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM user_library WHERE user_id = ? AND game_id = ?",
-                (user_id, game_id),
-            ).fetchone()
+        with self.db.session() as session:
+            row = session.execute(
+                select(UserLibrary.user_id).where(
+                    UserLibrary.user_id == user_id,
+                    UserLibrary.game_id == game_id,
+                )
+            ).first()
             return row is not None
 
     def library_game_ids(self, user_id: int) -> set[int]:
         """Return all game ids in the user's library as a Python set."""
-        with self.db.connect() as conn:
-            rows = conn.execute(
-                "SELECT game_id FROM user_library WHERE user_id = ?",
-                (user_id,),
-            ).fetchall()
-            return {row["game_id"] for row in rows}
+        with self.db.session() as session:
+            rows = session.execute(
+                select(UserLibrary.game_id).where(UserLibrary.user_id == user_id)
+            ).scalars().all()
+            return set(rows)

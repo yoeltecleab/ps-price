@@ -6,7 +6,7 @@ Reading order for learning how auth works end-to-end:
 
 1. **This file** — URLs, JSON bodies, cookies, status codes (what the frontend calls).
 2. ``auth_service.py`` — validation, emails, WebAuthn verification.
-3. ``auth_repository.py`` — SQLite queries.
+3. ``auth_repository.py`` — PostgreSQL queries via SQLAlchemy.
 
 Each route handler should stay small: rate-limit if needed → call ``AuthService`` →
 map ``AuthError`` to ``HTTPException`` → set or clear the session cookie when

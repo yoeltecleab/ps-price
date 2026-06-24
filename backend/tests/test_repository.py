@@ -1,14 +1,11 @@
 from datetime import UTC, datetime
 
-from backend.app.database import Database
 from backend.app.domain import ProductSnapshot
 from backend.app.repository import Repository
 
 
-def test_repository_upserts_games_and_records_history(tmp_path):
-    db = Database(str(tmp_path / "test.sqlite3"))
-    db.migrate()
-    repo = Repository(db)
+def test_repository_upserts_games_and_records_history(temp_db):
+    repo = Repository(temp_db)
     snapshot = ProductSnapshot(
         product_id="UP0000-PPSA00000_00-EXAMPLEGAME0000",
         locale="en-us",

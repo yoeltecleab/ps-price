@@ -17,6 +17,7 @@ def test_search_007_includes_first_light_editions(client, monkeypatch):
             current_price_formatted="$69.99",
             original_price_cents=6999,
             original_price_formatted="$69.99",
+            discount_text=None,
         ),
         SearchResult(
             product_id="EP3969-PPSA11386_00-007FLDELUXE00000",
@@ -30,6 +31,7 @@ def test_search_007_includes_first_light_editions(client, monkeypatch):
             current_price_formatted="$79.99",
             original_price_cents=7999,
             original_price_formatted="$79.99",
+            discount_text=None,
         ),
         SearchResult(
             product_id="EP3969-PPSA11386_00-007FLDELUXEUPG00",
@@ -43,6 +45,7 @@ def test_search_007_includes_first_light_editions(client, monkeypatch):
             current_price_formatted="$19.99",
             original_price_cents=1999,
             original_price_formatted="$19.99",
+            discount_text=None,
         ),
     ]
 

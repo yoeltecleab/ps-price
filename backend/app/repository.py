@@ -1,22 +1,22 @@
-"""Repository layer: SQL-only data access for the PS Price database.
+"""Repository layer: ORM data access for the PS Price database.
 
 What is the "repository pattern"?
 ---------------------------------
 Instead of sprinkling SQL strings through every part of the app, we collect
 *all* database reads and writes in this one module.  Benefits:
 
-- **Single place to learn the schema** — every ``SELECT``, ``INSERT``, and
-  ``UPDATE`` for games, watches, and notifications lives here.
+- **Single place to learn the schema** — every query for games, watches, and
+  notifications lives here.
 - **Service layer stays clean** — ``service.py`` calls ``repo.get_game(...)``
-  instead of writing SQL itself.
+  instead of writing queries itself.
 - **Easy to test** — you can swap a fake repository in unit tests.
 
 Rules this layer follows
 ------------------------
-- **SQL only** — no business rules like "user must own the game".  The service
-  layer decides *whether* an operation is allowed; the repository just
+- **Data access only** — no business rules like "user must own the game".  The
+  service layer decides *whether* an operation is allowed; the repository just
   executes it.
-- **Return plain dicts** — SQLite rows are converted to Python dictionaries so
+- **Return plain dicts** — ORM rows are converted to Python dictionaries so
   the API can serialize them to JSON without extra mapping classes.
 
 Main tables touched here
@@ -33,24 +33,29 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import and_, case, delete, distinct, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
 from backend.app.database import Database, row_to_dict
+from backend.app.db.models import (
+    CatalogMeta,
+    Game,
+    Notification,
+    PriceHistory,
+    User,
+    UserLibrary,
+    UserNotificationEmail,
+    Watch,
+)
+from backend.app.db.util import as_dict, utc_now_iso
 from backend.app.domain import ProductSnapshot, SearchResult
-from backend.app.name_utils import clean_game_name
 from backend.app.money import discount_percent
+from backend.app.name_utils import clean_game_name
 
 
 # Sentinel object meaning "caller did not supply this field" in partial updates.
 # Compare with ``is UNSET`` instead of ``is None`` because None can be a valid value.
 UNSET = object()
-
-
-def utc_now_iso() -> str:
-    """Return the current datetime as an ISO formatted string (UTC).
-
-    The repository stores all timestamps as ISO strings to simplify
-    SQLite usage and to avoid timezone pitfalls.
-    """
-    return datetime.now(UTC).isoformat()
 
 
 class Repository:
@@ -61,8 +66,8 @@ class Repository:
     lists of dictionaries) so the service and API layers can return them as
     JSON without extra mapping.
 
-    Thread safety: write methods acquire ``self.db._lock`` before opening a
-    connection so concurrent requests do not corrupt SQLite transactions.
+    Thread safety: ``Database.session()`` acquires the DB lock and commits or
+    rolls back each unit of work.
     """
 
     def __init__(self, db: Database):
@@ -91,142 +96,103 @@ class Repository:
             evaluation without an extra query.
         """
         now = utc_now_iso()
-        with self.db._lock, self.db.connect() as conn:
-            # Look up existing row so we know whether to UPDATE or INSERT.
-            existing = conn.execute(
-                "SELECT * FROM games WHERE product_id = ? AND locale = ?",
-                (snapshot.product_id, snapshot.locale),
-            ).fetchone()
-            previous_price = existing["current_price_cents"] if existing else None
-            if existing:
-                # Row already in DB — overwrite fields with the fresh snapshot.
-                conn.execute(
-                    """
-                    UPDATE games
-                    SET name = ?, category = ?, image_url = ?, store_url = ?, currency = ?,
-                        current_price_cents = ?, current_price_formatted = ?,
-                        original_price_cents = ?, original_price_formatted = ?,
-                        discount_text = ?, availability = ?, price_source = ?,
-                        sale_end_at = ?, last_checked_at = ?, last_success_at = ?,
-                        last_error = NULL, raw_source_hash = ?, discount_percent = ?,
-                        description_short = ?, description_long = ?, publisher = ?, release_date = ?, genres = ?, features = ?,
-                        rating_average = ?, rating_count = ?, content_rating = ?,
-                        screenshots = ?, edition = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        snapshot.name,
-                        snapshot.category,
-                        snapshot.image_url,
-                        snapshot.store_url,
-                        snapshot.currency,
-                        snapshot.current_price_cents,
-                        snapshot.current_price_formatted,
-                        snapshot.original_price_cents,
-                        snapshot.original_price_formatted,
-                        snapshot.discount_text,
-                        snapshot.availability,
-                        snapshot.price_source,
-                        _dt_iso(snapshot.sale_end_at),
-                        _dt_iso(snapshot.fetched_at),
-                        _dt_iso(snapshot.fetched_at),
-                        snapshot.raw_source_hash,
-                        discount_percent(
-                            snapshot.current_price_cents, snapshot.original_price_cents
-                        ),
-                        snapshot.description_short,
-                        snapshot.description_long,
-                        snapshot.publisher,
-                        snapshot.release_date,
-                        _json_list(snapshot.genres),
-                        _json_list(snapshot.features),
-                        snapshot.rating_average,
-                        snapshot.rating_count,
-                        snapshot.content_rating,
-                        _json_list(snapshot.screenshots),
-                        snapshot.edition,
-                        now,
-                        existing["id"],
-                    ),
+        pct = discount_percent(snapshot.current_price_cents, snapshot.original_price_cents)
+        with self.db.session() as session:
+            existing = session.scalar(
+                select(Game).where(
+                    Game.product_id == snapshot.product_id,
+                    Game.locale == snapshot.locale,
                 )
-                game_id = existing["id"]
-            else:
-                # First time we have seen this product — create a new games row.
-                cursor = conn.execute(
-                    """
-                    INSERT INTO games (
-                        product_id, locale, name, category, image_url, store_url, currency,
-                        current_price_cents, current_price_formatted,
-                        original_price_cents, original_price_formatted, discount_text,
-                        availability, price_source, sale_end_at, last_checked_at,
-                        last_success_at, last_error, raw_source_hash, is_tracked,
-                        discount_percent, description_short, description_long, publisher,
-                        release_date, genres, features, rating_average, rating_count,
-                        content_rating, screenshots, edition, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        snapshot.product_id,
-                        snapshot.locale,
-                        snapshot.name,
-                        snapshot.category,
-                        snapshot.image_url,
-                        snapshot.store_url,
-                        snapshot.currency,
-                        snapshot.current_price_cents,
-                        snapshot.current_price_formatted,
-                        snapshot.original_price_cents,
-                        snapshot.original_price_formatted,
-                        snapshot.discount_text,
-                        snapshot.availability,
-                        snapshot.price_source,
-                        _dt_iso(snapshot.sale_end_at),
-                        _dt_iso(snapshot.fetched_at),
-                        _dt_iso(snapshot.fetched_at),
-                        snapshot.raw_source_hash,
-                        int(mark_tracked),
-                        discount_percent(
-                            snapshot.current_price_cents, snapshot.original_price_cents
-                        ),
-                        snapshot.description_short,
-                        snapshot.description_long,
-                        snapshot.publisher,
-                        snapshot.release_date,
-                        _json_list(snapshot.genres),
-                        _json_list(snapshot.features),
-                        snapshot.rating_average,
-                        snapshot.rating_count,
-                        snapshot.content_rating,
-                        _json_list(snapshot.screenshots),
-                        snapshot.edition,
-                        now,
-                        now,
-                    ),
-                )
-                game_id = cursor.lastrowid
-
-            # Always append a history row so we can chart price over time.
-            conn.execute(
-                """
-                INSERT INTO price_history (
-                    game_id, checked_at, price_cents, original_price_cents, currency,
-                    price_formatted, original_price_formatted, discount_text, raw_source_hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    game_id,
-                    _dt_iso(snapshot.fetched_at),
-                    snapshot.current_price_cents,
-                    snapshot.original_price_cents,
-                    snapshot.currency,
-                    snapshot.current_price_formatted,
-                    snapshot.original_price_formatted,
-                    snapshot.discount_text,
-                    snapshot.raw_source_hash,
-                ),
             )
-            game = conn.execute("SELECT * FROM games WHERE id = ?", (game_id,)).fetchone()
-            return _hydrate_game(dict(game)), previous_price
+            previous_price = existing.current_price_cents if existing else None
+            if existing:
+                existing.name = snapshot.name
+                existing.category = snapshot.category
+                existing.image_url = snapshot.image_url
+                existing.store_url = snapshot.store_url
+                existing.currency = snapshot.currency
+                existing.current_price_cents = snapshot.current_price_cents
+                existing.current_price_formatted = snapshot.current_price_formatted
+                existing.original_price_cents = snapshot.original_price_cents
+                existing.original_price_formatted = snapshot.original_price_formatted
+                existing.discount_text = snapshot.discount_text
+                existing.availability = snapshot.availability
+                existing.price_source = snapshot.price_source
+                existing.sale_end_at = _dt_iso(snapshot.sale_end_at)
+                existing.last_checked_at = _dt_iso(snapshot.fetched_at)
+                existing.last_success_at = _dt_iso(snapshot.fetched_at)
+                existing.last_error = None
+                existing.raw_source_hash = snapshot.raw_source_hash
+                existing.discount_percent = pct
+                existing.description_short = snapshot.description_short
+                existing.description_long = snapshot.description_long
+                existing.publisher = snapshot.publisher
+                existing.release_date = snapshot.release_date
+                existing.genres = _json_list(snapshot.genres)
+                existing.features = _json_list(snapshot.features)
+                existing.rating_average = snapshot.rating_average
+                existing.rating_count = snapshot.rating_count
+                existing.content_rating = snapshot.content_rating
+                existing.screenshots = _json_list(snapshot.screenshots)
+                existing.edition = snapshot.edition
+                existing.updated_at = now
+                game_id = existing.id
+            else:
+                game = Game(
+                    product_id=snapshot.product_id,
+                    locale=snapshot.locale,
+                    name=snapshot.name,
+                    category=snapshot.category,
+                    image_url=snapshot.image_url,
+                    store_url=snapshot.store_url,
+                    currency=snapshot.currency,
+                    current_price_cents=snapshot.current_price_cents,
+                    current_price_formatted=snapshot.current_price_formatted,
+                    original_price_cents=snapshot.original_price_cents,
+                    original_price_formatted=snapshot.original_price_formatted,
+                    discount_text=snapshot.discount_text,
+                    availability=snapshot.availability,
+                    price_source=snapshot.price_source,
+                    sale_end_at=_dt_iso(snapshot.sale_end_at),
+                    last_checked_at=_dt_iso(snapshot.fetched_at),
+                    last_success_at=_dt_iso(snapshot.fetched_at),
+                    last_error=None,
+                    raw_source_hash=snapshot.raw_source_hash,
+                    is_tracked=int(mark_tracked),
+                    discount_percent=pct,
+                    description_short=snapshot.description_short,
+                    description_long=snapshot.description_long,
+                    publisher=snapshot.publisher,
+                    release_date=snapshot.release_date,
+                    genres=_json_list(snapshot.genres),
+                    features=_json_list(snapshot.features),
+                    rating_average=snapshot.rating_average,
+                    rating_count=snapshot.rating_count,
+                    content_rating=snapshot.content_rating,
+                    screenshots=_json_list(snapshot.screenshots),
+                    edition=snapshot.edition,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(game)
+                session.flush()
+                game_id = game.id
+
+            session.add(
+                PriceHistory(
+                    game_id=game_id,
+                    checked_at=_dt_iso(snapshot.fetched_at),
+                    price_cents=snapshot.current_price_cents,
+                    original_price_cents=snapshot.original_price_cents,
+                    currency=snapshot.currency,
+                    price_formatted=snapshot.current_price_formatted,
+                    original_price_formatted=snapshot.original_price_formatted,
+                    discount_text=snapshot.discount_text,
+                    raw_source_hash=snapshot.raw_source_hash,
+                )
+            )
+            game_row = session.get(Game, game_id)
+            return _hydrate_game(as_dict(game_row)), previous_price
 
     # -------------------------------------------------------------------------
     # Game check status — timestamps and error recording
@@ -238,27 +204,26 @@ class Repository:
         The error message is truncated to avoid unbounded DB field growth.
         """
         now = utc_now_iso()
-        with self.db._lock, self.db.connect() as conn:
-            conn.execute(
-                """
-                UPDATE games
-                SET last_checked_at = ?, last_error = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (now, error[:1000], now, game_id),
+        with self.db.session() as session:
+            session.execute(
+                update(Game)
+                .where(Game.id == game_id)
+                .values(last_checked_at=now, last_error=error[:1000], updated_at=now)
             )
 
     def mark_game_checked(self, game_id: int, checked_at: str | None = None) -> None:
         """Record a successful catalog price check timestamp for a tracked game."""
         now = checked_at or utc_now_iso()
-        with self.db._lock, self.db.connect() as conn:
-            conn.execute(
-                """
-                UPDATE games
-                SET last_checked_at = ?, last_success_at = ?, last_error = NULL, updated_at = ?
-                WHERE id = ?
-                """,
-                (now, now, now, game_id),
+        with self.db.session() as session:
+            session.execute(
+                update(Game)
+                .where(Game.id == game_id)
+                .values(
+                    last_checked_at=now,
+                    last_success_at=now,
+                    last_error=None,
+                    updated_at=now,
+                )
             )
 
     # -------------------------------------------------------------------------
@@ -273,38 +238,23 @@ class Repository:
         """
         if user_id is not None:
             return self.list_games_for_user(user_id)
-        clause = "WHERE is_tracked = 1" if tracked_only else ""
-        columns = """
-            id, product_id, locale, name, image_url, store_url, currency,
-            current_price_cents, current_price_formatted, original_price_cents,
-            original_price_formatted, discount_text, availability, last_checked_at,
-            last_error, discount_percent, is_tracked, created_at, updated_at
-        """
-        with self.db.connect() as conn:
-            rows = conn.execute(
-                f"SELECT {columns} FROM games {clause} ORDER BY name COLLATE NOCASE"
-            ).fetchall()
+        stmt = _game_lite_select().order_by(func.lower(Game.name))
+        if tracked_only:
+            stmt = stmt.where(Game.is_tracked == 1)
+        with self.db.session() as session:
+            rows = session.execute(stmt).mappings().all()
             return [_hydrate_game_lite(dict(row)) for row in rows]
 
     def list_games_for_user(self, user_id: int) -> list[dict]:
         """Return all games in a signed-in user's library via the join table."""
-        columns = """
-            g.id, g.product_id, g.locale, g.name, g.image_url, g.store_url, g.currency,
-            g.current_price_cents, g.current_price_formatted, g.original_price_cents,
-            g.original_price_formatted, g.discount_text, g.availability, g.last_checked_at,
-            g.last_error, g.discount_percent, g.created_at, g.updated_at
-        """
-        with self.db.connect() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT {columns}
-                FROM games g
-                JOIN user_library ul ON ul.game_id = g.id
-                WHERE ul.user_id = ?
-                ORDER BY g.name COLLATE NOCASE
-                """,
-                (user_id,),
-            ).fetchall()
+        stmt = (
+            _game_lite_select(exclude_is_tracked=True)
+            .join(UserLibrary, UserLibrary.game_id == Game.id)
+            .where(UserLibrary.user_id == user_id)
+            .order_by(func.lower(Game.name))
+        )
+        with self.db.session() as session:
+            rows = session.execute(stmt).mappings().all()
             games = [_hydrate_game_lite(dict(row)) for row in rows]
             for game in games:
                 game["is_tracked"] = True
@@ -316,59 +266,65 @@ class Repository:
         Used during catalog sync to know which library prices to compare
         before/after the upsert.
         """
-        with self.db.connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT DISTINCT g.id, g.product_id, g.locale, g.name, g.current_price_cents
-                FROM games g
-                JOIN user_library ul ON ul.game_id = g.id
-                """
-            ).fetchall()
+        stmt = (
+            select(
+                Game.id,
+                Game.product_id,
+                Game.locale,
+                Game.name,
+                Game.current_price_cents,
+            )
+            .join(UserLibrary, UserLibrary.game_id == Game.id)
+            .distinct()
+        )
+        with self.db.session() as session:
+            rows = session.execute(stmt).mappings().all()
             return [dict(row) for row in rows]
 
     def add_user_library(self, user_id: int, game_id: int) -> None:
-        """Link a game to a user's library (``INSERT OR IGNORE`` is idempotent)."""
+        """Link a game to a user's library (idempotent insert)."""
         now = utc_now_iso()
-        with self.db._lock, self.db.connect() as conn:
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO user_library (user_id, game_id, created_at)
-                VALUES (?, ?, ?)
-                """,
-                (user_id, game_id, now),
+        with self.db.session() as session:
+            session.execute(
+                pg_insert(UserLibrary)
+                .values(user_id=user_id, game_id=game_id, created_at=now)
+                .on_conflict_do_nothing()
             )
 
     def remove_user_library(self, user_id: int, game_id: int) -> bool:
         """Remove a game from a user's library and delete their watches for it."""
-        with self.db._lock, self.db.connect() as conn:
-            # Watches are per-user; clean them up when the game leaves the library.
-            conn.execute(
-                "DELETE FROM watches WHERE user_id = ? AND game_id = ?",
-                (user_id, game_id),
+        with self.db.session() as session:
+            session.execute(
+                delete(Watch).where(Watch.user_id == user_id, Watch.game_id == game_id)
             )
-            cursor = conn.execute(
-                "DELETE FROM user_library WHERE user_id = ? AND game_id = ?",
-                (user_id, game_id),
+            result = session.execute(
+                delete(UserLibrary).where(
+                    UserLibrary.user_id == user_id,
+                    UserLibrary.game_id == game_id,
+                )
             )
-            return cursor.rowcount > 0
+            return result.rowcount > 0
 
     def user_has_library_game(self, user_id: int, game_id: int) -> bool:
         """Return True when the user_library join row exists."""
-        with self.db.connect() as conn:
-            row = conn.execute(
-                "SELECT 1 FROM user_library WHERE user_id = ? AND game_id = ?",
-                (user_id, game_id),
-            ).fetchone()
-            return row is not None
+        with self.db.session() as session:
+            return (
+                session.scalar(
+                    select(UserLibrary.game_id).where(
+                        UserLibrary.user_id == user_id,
+                        UserLibrary.game_id == game_id,
+                    )
+                )
+                is not None
+            )
 
     def user_library_ids(self, user_id: int) -> set[int]:
         """Return the set of game IDs in a user's library (for fast membership checks)."""
-        with self.db.connect() as conn:
-            rows = conn.execute(
-                "SELECT game_id FROM user_library WHERE user_id = ?",
-                (user_id,),
-            ).fetchall()
-            return {row["game_id"] for row in rows}
+        with self.db.session() as session:
+            rows = session.scalars(
+                select(UserLibrary.game_id).where(UserLibrary.user_id == user_id)
+            ).all()
+            return set(rows)
 
     def annotate_user_tracked(self, user_id: int | None, games: list[dict]) -> list[dict]:
         """Set ``is_tracked`` on each game dict based on whether the user owns it."""
@@ -385,27 +341,16 @@ class Repository:
             return []
         now = utc_now_iso()
         unique_ids = list(dict.fromkeys(game_ids))
-        with self.db._lock, self.db.connect() as conn:
-            for game_id in unique_ids:
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO user_library (user_id, game_id, created_at)
-                    VALUES (?, ?, ?)
-                    """,
-                    (user_id, game_id, now),
+        with self.db.session() as session:
+            session.execute(
+                pg_insert(UserLibrary)
+                .values(
+                    [
+                        {"user_id": user_id, "game_id": game_id, "created_at": now}
+                        for game_id in unique_ids
+                    ]
                 )
-        return [g for gid in unique_ids if (g := self.get_game(gid))]
-
-        """Mark multiple catalog games as tracked without store calls."""
-        if not game_ids:
-            return []
-        now = utc_now_iso()
-        unique_ids = list(dict.fromkeys(game_ids))
-        with self.db._lock, self.db.connect() as conn:
-            placeholders = ",".join("?" * len(unique_ids))
-            conn.execute(
-                f"UPDATE games SET is_tracked = 1, updated_at = ? WHERE id IN ({placeholders})",
-                (now, *unique_ids),
+                .on_conflict_do_nothing()
             )
         return [g for gid in unique_ids if (g := self.get_game(gid))]
 
@@ -424,17 +369,18 @@ class Repository:
             return 0
         now = utc_now_iso()
         count = 0
-        with self.db._lock, self.db.connect() as conn:
+        with self.db.session() as session:
             for entry in entries:
-                existing = conn.execute(
-                    "SELECT * FROM games WHERE product_id = ? AND locale = ?",
-                    (entry.product_id, entry.locale),
-                ).fetchone()
-                existing_dict = dict(existing) if existing else None
+                existing = session.scalar(
+                    select(Game).where(
+                        Game.product_id == entry.product_id,
+                        Game.locale == entry.locale,
+                    )
+                )
+                existing_dict = as_dict(existing)
                 pct = discount_percent(entry.current_price_cents, entry.original_price_cents)
                 platforms_json = json.dumps(entry.platforms)
                 display_name = clean_game_name(entry.name)
-                # Derive a simple availability label from the price fields.
                 availability = "available"
                 if entry.current_price_cents == 0:
                     availability = "free"
@@ -475,98 +421,69 @@ class Repository:
                 )
                 content_rating = keep_rich(entry.content_rating, "content_rating")
 
-                if existing_dict:
-                    conn.execute(
-                        """
-                        UPDATE games
-                        SET name = ?, category = ?, image_url = ?, store_url = ?, currency = ?,
-                            current_price_cents = ?, current_price_formatted = ?,
-                            original_price_cents = ?, original_price_formatted = ?,
-                            discount_text = ?, availability = ?, platforms = ?,
-                            discount_percent = ?, catalog_synced_at = ?, popularity_rank = ?,
-                            description_short = ?, description_long = ?, publisher = ?,
-                            release_date = ?, genres = ?, features = ?, rating_average = ?,
-                            rating_count = ?, content_rating = ?, screenshots = ?, edition = ?,
-                            updated_at = ?
-                        WHERE id = ?
-                        """,
-                        (
-                            display_name,
-                            entry.category,
-                            entry.image_url,
-                            entry.store_url,
-                            entry.currency,
-                            entry.current_price_cents,
-                            entry.current_price_formatted,
-                            entry.original_price_cents,
-                            entry.original_price_formatted,
-                            entry.discount_text,
-                            availability,
-                            platforms_json,
-                            pct,
-                            now,
-                            entry.popularity_rank,
-                            description_short,
-                            description_long,
-                            publisher,
-                            release_date,
-                            genres_json,
-                            features_json,
-                            rating_average,
-                            rating_count,
-                            content_rating,
-                            screenshots_json,
-                            edition,
-                            now,
-                            existing_dict["id"],
-                        ),
-                    )
+                if existing:
+                    existing.name = display_name
+                    existing.category = entry.category
+                    existing.image_url = entry.image_url
+                    existing.store_url = entry.store_url
+                    existing.currency = entry.currency
+                    existing.current_price_cents = entry.current_price_cents
+                    existing.current_price_formatted = entry.current_price_formatted
+                    existing.original_price_cents = entry.original_price_cents
+                    existing.original_price_formatted = entry.original_price_formatted
+                    existing.discount_text = entry.discount_text
+                    existing.availability = availability
+                    existing.platforms = platforms_json
+                    existing.discount_percent = pct
+                    existing.catalog_synced_at = now
+                    existing.popularity_rank = entry.popularity_rank
+                    existing.description_short = description_short
+                    existing.description_long = description_long
+                    existing.publisher = publisher
+                    existing.release_date = release_date
+                    existing.genres = genres_json
+                    existing.features = features_json
+                    existing.rating_average = rating_average
+                    existing.rating_count = rating_count
+                    existing.content_rating = content_rating
+                    existing.screenshots = screenshots_json
+                    existing.edition = edition
+                    existing.updated_at = now
                 else:
-                    conn.execute(
-                        """
-                        INSERT INTO games (
-                            product_id, locale, name, category, image_url, store_url, currency,
-                            current_price_cents, current_price_formatted,
-                            original_price_cents, original_price_formatted, discount_text,
-                            availability, platforms, discount_percent, is_tracked,
-                            catalog_synced_at, popularity_rank, description_short,
-                            description_long, publisher, release_date, genres, features,
-                            rating_average, rating_count, content_rating, screenshots, edition,
-                            created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            entry.product_id,
-                            entry.locale,
-                            display_name,
-                            entry.category,
-                            entry.image_url,
-                            entry.store_url,
-                            entry.currency,
-                            entry.current_price_cents,
-                            entry.current_price_formatted,
-                            entry.original_price_cents,
-                            entry.original_price_formatted,
-                            entry.discount_text,
-                            availability,
-                            platforms_json,
-                            pct,
-                            now,
-                            entry.popularity_rank,
-                            entry.description_short,
-                            entry.description_long,
-                            entry.publisher,
-                            entry.release_date,
-                            _json_list(entry.genres),
-                            _json_list(entry.features),
-                            entry.rating_average,
-                            entry.rating_count,
-                            entry.content_rating,
-                            _json_list(entry.screenshots),
-                            entry.edition,
-                            now,
-                            now,
-                        ),
+                    session.add(
+                        Game(
+                            product_id=entry.product_id,
+                            locale=entry.locale,
+                            name=display_name,
+                            category=entry.category,
+                            image_url=entry.image_url,
+                            store_url=entry.store_url,
+                            currency=entry.currency,
+                            current_price_cents=entry.current_price_cents,
+                            current_price_formatted=entry.current_price_formatted,
+                            original_price_cents=entry.original_price_cents,
+                            original_price_formatted=entry.original_price_formatted,
+                            discount_text=entry.discount_text,
+                            availability=availability,
+                            platforms=platforms_json,
+                            discount_percent=pct,
+                            is_tracked=0,
+                            catalog_synced_at=now,
+                            popularity_rank=entry.popularity_rank,
+                            description_short=entry.description_short,
+                            description_long=entry.description_long,
+                            publisher=entry.publisher,
+                            release_date=entry.release_date,
+                            genres=_json_list(entry.genres),
+                            features=_json_list(entry.features),
+                            rating_average=entry.rating_average,
+                            rating_count=entry.rating_count,
+                            content_rating=entry.content_rating,
+                            screenshots=_json_list(entry.screenshots),
+                            edition=entry.edition,
+                            created_at=now,
+                            updated_at=now,
+                        )
                     )
                 count += 1
         return count
@@ -585,61 +502,30 @@ class Repository:
     ) -> tuple[list[dict], int]:
         """Query catalog games with filtering, sorting, and pagination.
 
-        Builds a dynamic SQL ``WHERE`` clause from the optional filters, runs a
-        ``COUNT(*)`` for pagination metadata, then returns the page of rows.
+        Builds dynamic SQLAlchemy filters from the optional parameters, runs a
+        count for pagination metadata, then returns the page of rows.
         """
-        where: list[str] = []
-        params: list[object] = []
+        filters = _deals_filters(
+            q=q,
+            platform=platform,
+            min_discount=min_discount,
+            max_price_cents=max_price_cents,
+            on_sale_only=on_sale_only,
+        )
+        order = _deals_order_by(sort, sort_dir)
 
-        if on_sale_only:
-            where.append(
-                "(discount_percent IS NOT NULL AND discount_percent > 0 "
-                "OR original_price_cents IS NOT NULL "
-                "AND current_price_cents IS NOT NULL "
-                "AND original_price_cents > current_price_cents)"
-            )
-        if q:
-            where.append("name LIKE ?")
-            params.append(f"%{q.strip()}%")
-        if platform:
-            where.append("platforms LIKE ?")
-            params.append(f'%"{platform}"%')
-        if min_discount is not None and min_discount > 0:
-            where.append("discount_percent >= ?")
-            params.append(min_discount)
-        if max_price_cents is not None:
-            where.append("current_price_cents <= ?")
-            params.append(max_price_cents)
+        with self.db.session() as session:
+            count_stmt = select(func.count()).select_from(Game)
+            if filters:
+                count_stmt = count_stmt.where(*filters)
+            total = session.scalar(count_stmt) or 0
 
-        suffix = f"WHERE {' AND '.join(where)}" if where else ""
-        direction = "ASC" if sort_dir == "asc" else "DESC"
-        # Map API sort keys to SQL ORDER BY expressions.
-        order_map = {
-            "popularity": f"popularity_rank {direction} NULLS LAST, name COLLATE NOCASE",
-            "discount": f"discount_percent {direction} NULLS LAST, name COLLATE NOCASE",
-            "savings": f"(original_price_cents - current_price_cents) {direction} NULLS LAST",
-            "savings_percent": f"discount_percent {direction} NULLS LAST, name COLLATE NOCASE",
-            "price": f"current_price_cents {direction} NULLS LAST",
-            "original": f"original_price_cents {direction} NULLS LAST",
-            "name": f"name COLLATE NOCASE {direction}",
-            "newest": f"catalog_synced_at {direction}, updated_at {direction}",
-            "rating": f"rating_average {direction} NULLS LAST, rating_count {direction} NULLS LAST",
-        }
-        order = order_map.get(sort, order_map["discount"])
-
-        with self.db.connect() as conn:
-            total = conn.execute(
-                f"SELECT COUNT(*) FROM games {suffix}", params
-            ).fetchone()[0]
-            rows = conn.execute(
-                f"""
-                SELECT * FROM games {suffix}
-                ORDER BY {order}
-                LIMIT ? OFFSET ?
-                """,
-                (*params, limit, offset),
-            ).fetchall()
-            return [_hydrate_game(dict(row)) for row in rows], total
+            stmt = select(Game)
+            if filters:
+                stmt = stmt.where(*filters)
+            stmt = stmt.order_by(*order).limit(limit).offset(offset)
+            rows = session.scalars(stmt).all()
+            return [_hydrate_game(as_dict(row)) for row in rows], total
 
     def search_catalog(self, q: str, limit: int = 20) -> list[dict]:
         """Search local catalog by name or product id.
@@ -652,31 +538,32 @@ class Repository:
             return []
         bounded = max(1, min(limit, 100))
         tokens = [t for t in clean.split() if t]
-        with self.db.connect() as conn:
-            where_parts: list[str] = []
-            params: list[object] = []
-            for token in tokens:
-                where_parts.append(
-                    "(name LIKE ? OR product_id LIKE ? OR edition LIKE ? OR description_short LIKE ?)"
+        token_filters = []
+        for token in tokens:
+            pattern = f"%{token}%"
+            token_filters.append(
+                or_(
+                    Game.name.ilike(pattern),
+                    Game.product_id.ilike(pattern),
+                    Game.edition.ilike(pattern),
+                    Game.description_short.ilike(pattern),
                 )
-                pattern = f"%{token}%"
-                params.extend([pattern, pattern, pattern, pattern])
-            where = " AND ".join(where_parts)
-            prefix = f"{clean}%"
-            rows = conn.execute(
-                f"""
-                SELECT * FROM games
-                WHERE {where}
-                ORDER BY
-                    CASE WHEN name LIKE ? THEN 0 ELSE 1 END,
-                    popularity_rank ASC NULLS LAST,
-                    discount_percent DESC NULLS LAST,
-                    name COLLATE NOCASE
-                LIMIT ?
-                """,
-                (*params, prefix, bounded),
-            ).fetchall()
-            return [_hydrate_game(dict(row)) for row in rows]
+            )
+        prefix = f"{clean}%"
+        with self.db.session() as session:
+            stmt = (
+                select(Game)
+                .where(*token_filters)
+                .order_by(
+                    case((Game.name.ilike(prefix), 0), else_=1),
+                    Game.popularity_rank.asc().nulls_last(),
+                    Game.discount_percent.desc().nulls_last(),
+                    func.lower(Game.name).asc(),
+                )
+                .limit(bounded)
+            )
+            rows = session.scalars(stmt).all()
+            return [_hydrate_game(as_dict(row)) for row in rows]
 
     def suggest_names(self, q: str, limit: int = 8) -> list[dict]:
         """Return name suggestions for autocomplete from the local catalog."""
@@ -684,22 +571,21 @@ class Repository:
         if not clean:
             return []
         bounded = max(1, min(limit, 20))
-        with self.db.connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, name, product_id, image_url, current_price_formatted,
-                       discount_percent, is_tracked
-                FROM games
-                WHERE name LIKE ? OR product_id LIKE ?
-                ORDER BY
-                    CASE WHEN name LIKE ? THEN 0 ELSE 1 END,
-                    discount_percent DESC NULLS LAST,
-                    name COLLATE NOCASE
-                LIMIT ?
-                """,
-                (f"%{clean}%", f"%{clean}%", f"{clean}%", bounded),
-            ).fetchall()
-            return [_hydrate_game(dict(row)) for row in rows]
+        pattern = f"%{clean}%"
+        prefix = f"{clean}%"
+        with self.db.session() as session:
+            stmt = (
+                select(Game)
+                .where(or_(Game.name.ilike(pattern), Game.product_id.ilike(pattern)))
+                .order_by(
+                    case((Game.name.ilike(prefix), 0), else_=1),
+                    Game.discount_percent.desc().nulls_last(),
+                    func.lower(Game.name).asc(),
+                )
+                .limit(bounded)
+            )
+            rows = session.scalars(stmt).all()
+            return [_hydrate_game(as_dict(row)) for row in rows]
 
     # -------------------------------------------------------------------------
     # Single-game lookups, history, and scheduler helpers
@@ -708,63 +594,67 @@ class Repository:
     def mark_tracked(self, game_id: int) -> dict | None:
         """Mark a catalog game as actively tracked by the user."""
         now = utc_now_iso()
-        with self.db._lock, self.db.connect() as conn:
-            conn.execute(
-                "UPDATE games SET is_tracked = 1, updated_at = ? WHERE id = ?",
-                (now, game_id),
+        with self.db.session() as session:
+            session.execute(
+                update(Game).where(Game.id == game_id).values(is_tracked=1, updated_at=now)
             )
-            row = conn.execute("SELECT * FROM games WHERE id = ?", (game_id,)).fetchone()
-            return _hydrate_game(dict(row)) if row else None
+            game = session.get(Game, game_id)
+            return _hydrate_game(as_dict(game)) if game else None
 
     def set_catalog_meta(self, key: str, value: str) -> None:
         """Store a key/value pair describing catalog sync state (e.g. last sync time)."""
         now = utc_now_iso()
-        with self.db._lock, self.db.connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO catalog_meta (key, value, updated_at) VALUES (?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-                """,
-                (key, value, now),
+        with self.db.session() as session:
+            session.execute(
+                pg_insert(CatalogMeta)
+                .values(key=key, value=value, updated_at=now)
+                .on_conflict_do_update(
+                    index_elements=[CatalogMeta.key],
+                    set_={"value": value, "updated_at": now},
+                )
             )
 
     def get_catalog_meta(self, key: str) -> str | None:
         """Read a single catalog_meta value, or None if the key does not exist."""
-        with self.db.connect() as conn:
-            row = conn.execute(
-                "SELECT value FROM catalog_meta WHERE key = ?", (key,)
-            ).fetchone()
-            return row["value"] if row else None
+        with self.db.session() as session:
+            return session.scalar(select(CatalogMeta.value).where(CatalogMeta.key == key))
 
     def catalog_count(self) -> int:
         """Return total number of rows in the games table."""
-        with self.db.connect() as conn:
-            return conn.execute("SELECT COUNT(*) FROM games").fetchone()[0]
+        with self.db.session() as session:
+            return session.scalar(select(func.count()).select_from(Game)) or 0
 
     def admin_stats(self) -> dict:
         """Aggregate counts for the admin dashboard."""
-        with self.db.connect() as conn:
-            catalog_total = conn.execute("SELECT COUNT(*) FROM games").fetchone()[0]
-            on_sale = conn.execute(
-                "SELECT COUNT(*) FROM games WHERE discount_percent > 0"
-            ).fetchone()[0]
-            tracked = conn.execute(
-                "SELECT COUNT(*) FROM games WHERE is_tracked = 1"
-            ).fetchone()[0]
-            library_entries = conn.execute(
-                "SELECT COUNT(*) FROM user_library"
-            ).fetchone()[0]
-            watches_total = conn.execute("SELECT COUNT(*) FROM watches").fetchone()[0]
-            watches_enabled = conn.execute(
-                "SELECT COUNT(*) FROM watches WHERE enabled = 1"
-            ).fetchone()[0]
-            rows = conn.execute(
-                """
-                SELECT status, COUNT(*) AS count
-                FROM notifications
-                GROUP BY status
-                """
-            ).fetchall()
+        with self.db.session() as session:
+            catalog_total = session.scalar(select(func.count()).select_from(Game)) or 0
+            on_sale = (
+                session.scalar(
+                    select(func.count()).select_from(Game).where(Game.discount_percent > 0)
+                )
+                or 0
+            )
+            tracked = (
+                session.scalar(
+                    select(func.count()).select_from(Game).where(Game.is_tracked == 1)
+                )
+                or 0
+            )
+            library_entries = (
+                session.scalar(select(func.count()).select_from(UserLibrary)) or 0
+            )
+            watches_total = session.scalar(select(func.count()).select_from(Watch)) or 0
+            watches_enabled = (
+                session.scalar(
+                    select(func.count()).select_from(Watch).where(Watch.enabled == 1)
+                )
+                or 0
+            )
+            rows = session.execute(
+                select(Notification.status, func.count().label("count")).group_by(
+                    Notification.status
+                )
+            ).mappings().all()
             notification_counts = {row["status"]: row["count"] for row in rows}
         return {
             "catalog_total": catalog_total,
@@ -784,43 +674,45 @@ class Repository:
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[dict], int]:
-        where: list[str] = []
-        params: list[object] = []
+        filters = []
         if enabled_only:
-            where.append("w.enabled = 1")
+            filters.append(Watch.enabled == 1)
         if q and q.strip():
             pattern = f"%{q.strip()}%"
-            where.append(
-                "(g.name LIKE ? OR w.email LIKE ? OR u.email LIKE ?)"
+            filters.append(
+                or_(
+                    Game.name.ilike(pattern),
+                    Watch.email.ilike(pattern),
+                    User.email.ilike(pattern),
+                )
             )
-            params.extend([pattern, pattern, pattern])
-        suffix = f"WHERE {' AND '.join(where)}" if where else ""
         bounded = max(1, min(limit, 200))
-        with self.db.connect() as conn:
-            total = conn.execute(
-                f"""
-                SELECT COUNT(*)
-                FROM watches w
-                JOIN games g ON g.id = w.game_id
-                LEFT JOIN users u ON u.id = w.user_id
-                {suffix}
-                """,
-                params,
-            ).fetchone()[0]
-            rows = conn.execute(
-                f"""
-                SELECT w.*, g.name AS game_name, g.current_price_cents,
-                       g.current_price_formatted, g.store_url, u.email AS user_email
-                FROM watches w
-                JOIN games g ON g.id = w.game_id
-                LEFT JOIN users u ON u.id = w.user_id
-                {suffix}
-                ORDER BY w.created_at DESC
-                LIMIT ? OFFSET ?
-                """,
-                (*params, bounded, max(0, offset)),
-            ).fetchall()
-            return [dict(row) for row in rows], total
+        base = (
+            select(Watch)
+            .add_columns(
+                Game.name.label("game_name"),
+                Game.current_price_cents,
+                Game.current_price_formatted,
+                Game.store_url,
+                User.email.label("user_email"),
+            )
+            .join(Game, Watch.game_id == Game.id)
+            .outerjoin(User, Watch.user_id == User.id)
+        )
+        if filters:
+            base = base.where(*filters)
+        with self.db.session() as session:
+            count_stmt = select(func.count()).select_from(Watch)
+            if filters:
+                count_stmt = (
+                    count_stmt.join(Game, Watch.game_id == Game.id)
+                    .outerjoin(User, Watch.user_id == User.id)
+                    .where(*filters)
+                )
+            total = session.scalar(count_stmt) or 0
+            stmt = base.order_by(Watch.created_at.desc()).limit(bounded).offset(max(0, offset))
+            rows = session.execute(stmt).mappings().all()
+            return [as_dict(row) for row in rows], total
 
     def list_notifications_admin(
         self,
@@ -829,31 +721,33 @@ class Repository:
         limit: int = 100,
         offset: int = 0,
     ) -> tuple[list[dict], int]:
-        where: list[str] = []
-        params: list[object] = []
+        filters = []
         if status:
-            where.append("n.status = ?")
-            params.append(status)
-        suffix = f"WHERE {' AND '.join(where)}" if where else ""
+            filters.append(Notification.status == status)
         bounded = max(1, min(limit, 500))
-        with self.db.connect() as conn:
-            total = conn.execute(
-                f"SELECT COUNT(*) FROM notifications n {suffix}",
-                params,
-            ).fetchone()[0]
-            rows = conn.execute(
-                f"""
-                SELECT n.*, g.name AS game_name, u.email AS user_email
-                FROM notifications n
-                LEFT JOIN games g ON g.id = n.game_id
-                LEFT JOIN users u ON u.id = n.user_id
-                {suffix}
-                ORDER BY n.created_at DESC, n.id DESC
-                LIMIT ? OFFSET ?
-                """,
-                (*params, bounded, max(0, offset)),
-            ).fetchall()
-            return [dict(row) for row in rows], total
+        base = (
+            select(Notification)
+            .add_columns(
+                Game.name.label("game_name"),
+                User.email.label("user_email"),
+            )
+            .outerjoin(Game, Notification.game_id == Game.id)
+            .outerjoin(User, Notification.user_id == User.id)
+        )
+        if filters:
+            base = base.where(*filters)
+        with self.db.session() as session:
+            count_stmt = select(func.count()).select_from(Notification)
+            if filters:
+                count_stmt = count_stmt.where(*filters)
+            total = session.scalar(count_stmt) or 0
+            stmt = (
+                base.order_by(Notification.created_at.desc(), Notification.id.desc())
+                .limit(bounded)
+                .offset(max(0, offset))
+            )
+            rows = session.execute(stmt).mappings().all()
+            return [as_dict(row) for row in rows], total
 
     def list_games_admin(
         self,
@@ -879,97 +773,112 @@ class Repository:
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[dict], int]:
-        where: list[str] = []
-        params: list[object] = []
+        filters = []
         if q and q.strip():
             pattern = f"%{q.strip()}%"
-            where.append("(g.name LIKE ? OR u.email LIKE ?)")
-            params.extend([pattern, pattern])
-        suffix = f"WHERE {' AND '.join(where)}" if where else ""
+            filters.append(or_(Game.name.ilike(pattern), User.email.ilike(pattern)))
         bounded = max(1, min(limit, 200))
-        with self.db.connect() as conn:
-            total = conn.execute(
-                f"""
-                SELECT COUNT(*)
-                FROM user_library ul
-                JOIN games g ON g.id = ul.game_id
-                JOIN users u ON u.id = ul.user_id
-                {suffix}
-                """,
-                params,
-            ).fetchone()[0]
-            rows = conn.execute(
-                f"""
-                SELECT ul.user_id, ul.game_id, ul.created_at,
-                       g.name AS game_name, g.current_price_formatted, g.discount_percent,
-                       u.email AS user_email
-                FROM user_library ul
-                JOIN games g ON g.id = ul.game_id
-                JOIN users u ON u.id = ul.user_id
-                {suffix}
-                ORDER BY ul.created_at DESC
-                LIMIT ? OFFSET ?
-                """,
-                (*params, bounded, max(0, offset)),
-            ).fetchall()
-            return [dict(row) for row in rows], total
+        base = (
+            select(
+                UserLibrary.user_id,
+                UserLibrary.game_id,
+                UserLibrary.created_at,
+                Game.name.label("game_name"),
+                Game.current_price_formatted,
+                Game.discount_percent,
+                User.email.label("user_email"),
+            )
+            .join(Game, UserLibrary.game_id == Game.id)
+            .join(User, UserLibrary.user_id == User.id)
+        )
+        if filters:
+            base = base.where(*filters)
+        with self.db.session() as session:
+            count_stmt = (
+                select(func.count())
+                .select_from(UserLibrary)
+                .join(Game, UserLibrary.game_id == Game.id)
+                .join(User, UserLibrary.user_id == User.id)
+            )
+            if filters:
+                count_stmt = count_stmt.where(*filters)
+            total = session.scalar(count_stmt) or 0
+            stmt = base.order_by(UserLibrary.created_at.desc()).limit(bounded).offset(max(0, offset))
+            rows = session.execute(stmt).mappings().all()
+            return [as_dict(row) for row in rows], total
 
     def admin_insights(self) -> dict:
         """Extended analytics for the admin command center."""
-        with self.db.connect() as conn:
-            recent_users = conn.execute(
-                """
-                SELECT id, email, display_name, email_verified_at, created_at
-                FROM users
-                ORDER BY created_at DESC
-                LIMIT 8
-                """
-            ).fetchall()
-            top_watched = conn.execute(
-                """
-                SELECT g.id, g.name, g.current_price_formatted, COUNT(w.id) AS watch_count
-                FROM watches w
-                JOIN games g ON g.id = w.game_id
-                WHERE w.enabled = 1
-                GROUP BY g.id
-                ORDER BY watch_count DESC, g.name COLLATE NOCASE
-                LIMIT 10
-                """
-            ).fetchall()
-            recent_watches = conn.execute(
-                """
-                SELECT w.id, w.created_at, g.name AS game_name, u.email AS user_email
-                FROM watches w
-                JOIN games g ON g.id = w.game_id
-                LEFT JOIN users u ON u.id = w.user_id
-                ORDER BY w.created_at DESC
-                LIMIT 8
-                """
-            ).fetchall()
-            recent_emails = conn.execute(
-                """
-                SELECT n.id, n.email, n.subject, n.status, n.created_at, g.name AS game_name
-                FROM notifications n
-                LEFT JOIN games g ON g.id = n.game_id
-                ORDER BY n.created_at DESC
-                LIMIT 8
-                """
-            ).fetchall()
-            price_history_rows = conn.execute(
-                "SELECT COUNT(*) FROM price_history"
-            ).fetchone()[0]
-            unverified_users = conn.execute(
-                "SELECT COUNT(*) FROM users WHERE email_verified_at IS NULL"
-            ).fetchone()[0]
-            notification_emails = conn.execute(
-                "SELECT COUNT(*) FROM user_notification_emails"
-            ).fetchone()[0]
-            avg_discount = conn.execute(
-                """
-                SELECT AVG(discount_percent) FROM games
-                WHERE discount_percent IS NOT NULL AND discount_percent > 0
-                """
-            ).fetchone()[0]
+        with self.db.session() as session:
+            recent_users = session.execute(
+                select(
+                    User.id,
+                    User.email,
+                    User.display_name,
+                    User.email_verified_at,
+                    User.created_at,
+                )
+                .order_by(User.created_at.desc())
+                .limit(8)
+            ).mappings().all()
+            top_watched = session.execute(
+                select(
+                    Game.id,
+                    Game.name,
+                    Game.current_price_formatted,
+                    func.count(Watch.id).label("watch_count"),
+                )
+                .join(Watch, Watch.game_id == Game.id)
+                .where(Watch.enabled == 1)
+                .group_by(Game.id)
+                .order_by(func.count(Watch.id).desc(), func.lower(Game.name).asc())
+                .limit(10)
+            ).mappings().all()
+            recent_watches = session.execute(
+                select(
+                    Watch.id,
+                    Watch.created_at,
+                    Game.name.label("game_name"),
+                    User.email.label("user_email"),
+                )
+                .join(Game, Watch.game_id == Game.id)
+                .outerjoin(User, Watch.user_id == User.id)
+                .order_by(Watch.created_at.desc())
+                .limit(8)
+            ).mappings().all()
+            recent_emails = session.execute(
+                select(
+                    Notification.id,
+                    Notification.email,
+                    Notification.subject,
+                    Notification.status,
+                    Notification.created_at,
+                    Game.name.label("game_name"),
+                )
+                .outerjoin(Game, Notification.game_id == Game.id)
+                .order_by(Notification.created_at.desc())
+                .limit(8)
+            ).mappings().all()
+            price_history_rows = (
+                session.scalar(select(func.count()).select_from(PriceHistory)) or 0
+            )
+            unverified_users = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(User)
+                    .where(User.email_verified_at.is_(None))
+                )
+                or 0
+            )
+            notification_emails = (
+                session.scalar(select(func.count()).select_from(UserNotificationEmail)) or 0
+            )
+            avg_discount = session.scalar(
+                select(func.avg(Game.discount_percent)).where(
+                    Game.discount_percent.isnot(None),
+                    Game.discount_percent > 0,
+                )
+            )
         return {
             "recent_users": [dict(row) for row in recent_users],
             "top_watched_games": [dict(row) for row in top_watched],
@@ -981,58 +890,55 @@ class Repository:
             "avg_discount_percent": round(avg_discount or 0, 1),
         }
 
-    def purge_notifications(self, *, status: str | None = None, older_than_days: int | None = None) -> int:
-        where: list[str] = []
-        params: list[object] = []
+    def purge_notifications(
+        self, *, status: str | None = None, older_than_days: int | None = None
+    ) -> int:
+        filters = []
         if status:
-            where.append("status = ?")
-            params.append(status)
+            filters.append(Notification.status == status)
         if older_than_days is not None and older_than_days > 0:
             cutoff = (datetime.now(UTC) - timedelta(days=older_than_days)).isoformat()
-            where.append("created_at < ?")
-            params.append(cutoff)
-        suffix = f"WHERE {' AND '.join(where)}" if where else ""
-        with self.db._lock, self.db.connect() as conn:
-            cursor = conn.execute(f"DELETE FROM notifications {suffix}", params)
-            return cursor.rowcount
+            filters.append(Notification.created_at < cutoff)
+        with self.db.session() as session:
+            stmt = delete(Notification)
+            if filters:
+                stmt = stmt.where(*filters)
+            result = session.execute(stmt)
+            return result.rowcount
 
     def get_game(self, game_id: int) -> dict | None:
         """Return a single game row by its integer id or None if missing."""
-        with self.db.connect() as conn:
-            row = conn.execute("SELECT * FROM games WHERE id = ?", (game_id,)).fetchone()
-            return _hydrate_game(dict(row)) if row else None
+        with self.db.session() as session:
+            game = session.get(Game, game_id)
+            return _hydrate_game(as_dict(game)) if game else None
 
     def get_game_by_product(self, product_id: str, locale: str) -> dict | None:
         """Lookup a game by product_id and locale pair."""
-        with self.db.connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM games WHERE product_id = ? AND locale = ?",
-                (product_id, locale),
-            ).fetchone()
-            return _hydrate_game(dict(row)) if row else None
+        with self.db.session() as session:
+            game = session.scalar(
+                select(Game).where(Game.product_id == product_id, Game.locale == locale)
+            )
+            return _hydrate_game(as_dict(game)) if game else None
 
     def delete_game(self, game_id: int) -> bool:
         """Delete a game and cascade-delete related watches/history.
 
         Returns True when a row was deleted.
         """
-        with self.db._lock, self.db.connect() as conn:
-            cursor = conn.execute("DELETE FROM games WHERE id = ?", (game_id,))
-            return cursor.rowcount > 0
+        with self.db.session() as session:
+            result = session.execute(delete(Game).where(Game.id == game_id))
+            return result.rowcount > 0
 
     def get_history(self, game_id: int, limit: int = 50) -> list[dict]:
         """Return the most recent price history rows for a game."""
-        with self.db.connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM price_history
-                WHERE game_id = ?
-                ORDER BY checked_at DESC, id DESC
-                LIMIT ?
-                """,
-                (game_id, limit),
-            ).fetchall()
-            return [dict(row) for row in rows]
+        with self.db.session() as session:
+            rows = session.scalars(
+                select(PriceHistory)
+                .where(PriceHistory.game_id == game_id)
+                .order_by(PriceHistory.checked_at.desc(), PriceHistory.id.desc())
+                .limit(limit)
+            ).all()
+            return [as_dict(row) for row in rows]
 
     def due_games(self, check_interval_minutes: int) -> list[dict]:
         """Return library games due for a catalog price refresh.
@@ -1041,18 +947,21 @@ class Repository:
         configured interval.  The background scheduler uses this to decide when
         to call ``sync_deals``.
         """
-        cutoff = datetime.now(UTC) - timedelta(minutes=check_interval_minutes)
-        with self.db.connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT DISTINCT g.id, g.product_id, g.locale, g.name, g.current_price_cents
-                FROM games g
-                JOIN user_library ul ON ul.game_id = g.id
-                WHERE g.last_checked_at IS NULL OR g.last_checked_at <= ?
-                ORDER BY COALESCE(g.last_checked_at, g.created_at)
-                """,
-                (cutoff.isoformat(),),
-            ).fetchall()
+        cutoff = (datetime.now(UTC) - timedelta(minutes=check_interval_minutes)).isoformat()
+        with self.db.session() as session:
+            rows = session.execute(
+                select(
+                    Game.id,
+                    Game.product_id,
+                    Game.locale,
+                    Game.name,
+                    Game.current_price_cents,
+                )
+                .join(UserLibrary, UserLibrary.game_id == Game.id)
+                .where(or_(Game.last_checked_at.is_(None), Game.last_checked_at <= cutoff))
+                .group_by(Game.id)
+                .order_by(func.coalesce(func.min(Game.last_checked_at), func.min(Game.created_at)))
+            ).mappings().all()
             return [dict(row) for row in rows]
 
     # -------------------------------------------------------------------------
@@ -1080,43 +989,32 @@ class Repository:
         (library membership, verified email) happens in the service layer.
         """
         now = utc_now_iso()
-        with self.db._lock, self.db.connect() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO watches (
-                    game_id, email, target_price_cents, notify_on_any_drop, enabled,
-                    theme_id, user_id, notification_email_id, min_drop_cents, min_drop_percent,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    game_id,
-                    email,
-                    target_price_cents,
-                    int(notify_on_any_drop),
-                    int(enabled),
-                    theme_id,
-                    user_id,
-                    notification_email_id,
-                    min_drop_cents,
-                    min_drop_percent,
-                    now,
-                    now,
-                ),
+        with self.db.session() as session:
+            watch = Watch(
+                game_id=game_id,
+                email=email,
+                target_price_cents=target_price_cents,
+                notify_on_any_drop=int(notify_on_any_drop),
+                enabled=int(enabled),
+                theme_id=theme_id,
+                user_id=user_id,
+                notification_email_id=notification_email_id,
+                min_drop_cents=min_drop_cents,
+                min_drop_percent=min_drop_percent,
+                created_at=now,
+                updated_at=now,
             )
-            return dict(conn.execute("SELECT * FROM watches WHERE id = ?", (cursor.lastrowid,)).fetchone())
+            session.add(watch)
+            session.flush()
+            return as_dict(session.get(Watch, watch.id))
 
     def get_watch(self, watch_id: int, user_id: int | None = None) -> dict | None:
         """Return a single watch row by id or None if missing."""
-        with self.db.connect() as conn:
-            if user_id is None:
-                return row_to_dict(conn.execute("SELECT * FROM watches WHERE id = ?", (watch_id,)).fetchone())
-            return row_to_dict(
-                conn.execute(
-                    "SELECT * FROM watches WHERE id = ? AND user_id = ?",
-                    (watch_id, user_id),
-                ).fetchone()
-            )
+        with self.db.session() as session:
+            stmt = select(Watch).where(Watch.id == watch_id)
+            if user_id is not None:
+                stmt = stmt.where(Watch.user_id == user_id)
+            return row_to_dict(session.scalar(stmt))
 
     def update_watch(
         self,
@@ -1150,28 +1048,22 @@ class Repository:
         )
         new_email = current["email"] if email is UNSET else email
         now = utc_now_iso()
-        with self.db._lock, self.db.connect() as conn:
-            conn.execute(
-                """
-                UPDATE watches
-                SET target_price_cents = ?, notify_on_any_drop = ?, enabled = ?,
-                    min_drop_cents = ?, min_drop_percent = ?, notification_email_id = ?,
-                    email = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    new_target,
-                    new_drop,
-                    new_enabled,
-                    new_min_cents,
-                    new_min_pct,
-                    new_email_id,
-                    new_email,
-                    now,
-                    watch_id,
-                ),
+        with self.db.session() as session:
+            session.execute(
+                update(Watch)
+                .where(Watch.id == watch_id)
+                .values(
+                    target_price_cents=new_target,
+                    notify_on_any_drop=new_drop,
+                    enabled=new_enabled,
+                    min_drop_cents=new_min_cents,
+                    min_drop_percent=new_min_pct,
+                    notification_email_id=new_email_id,
+                    email=new_email,
+                    updated_at=now,
+                )
             )
-            return row_to_dict(conn.execute("SELECT * FROM watches WHERE id = ?", (watch_id,)).fetchone())
+            return row_to_dict(session.get(Watch, watch_id))
 
     def list_watches(
         self,
@@ -1184,42 +1076,39 @@ class Repository:
         The returned rows include some selected game columns for convenience
         in the API layer (game_name, current_price_cents, etc.).
         """
-        where: list[str] = []
-        params: list[object] = []
+        filters = []
         if game_id is not None:
-            where.append("w.game_id = ?")
-            params.append(game_id)
+            filters.append(Watch.game_id == game_id)
         if enabled_only:
-            where.append("w.enabled = 1")
+            filters.append(Watch.enabled == 1)
         if user_id is not None:
-            where.append("w.user_id = ?")
-            params.append(user_id)
-        suffix = f"WHERE {' AND '.join(where)}" if where else ""
-        with self.db.connect() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT w.*, g.name AS game_name, g.current_price_cents, g.current_price_formatted,
-                       g.currency, g.store_url
-                FROM watches w
-                JOIN games g ON g.id = w.game_id
-                {suffix}
-                ORDER BY w.created_at DESC
-                """,
-                params,
-            ).fetchall()
-            return [dict(row) for row in rows]
+            filters.append(Watch.user_id == user_id)
+        stmt = (
+            select(Watch)
+            .add_columns(
+                Game.name.label("game_name"),
+                Game.current_price_cents,
+                Game.current_price_formatted,
+                Game.currency,
+                Game.store_url,
+            )
+            .join(Game, Watch.game_id == Game.id)
+        )
+        if filters:
+            stmt = stmt.where(*filters)
+        stmt = stmt.order_by(Watch.created_at.desc())
+        with self.db.session() as session:
+            rows = session.execute(stmt).mappings().all()
+            return [as_dict(row) for row in rows]
 
     def delete_watch(self, watch_id: int, user_id: int | None = None) -> bool:
         """Delete a watch by id. Returns True when a row was deleted."""
-        with self.db._lock, self.db.connect() as conn:
-            if user_id is None:
-                cursor = conn.execute("DELETE FROM watches WHERE id = ?", (watch_id,))
-            else:
-                cursor = conn.execute(
-                    "DELETE FROM watches WHERE id = ? AND user_id = ?",
-                    (watch_id, user_id),
-                )
-            return cursor.rowcount > 0
+        with self.db.session() as session:
+            stmt = delete(Watch).where(Watch.id == watch_id)
+            if user_id is not None:
+                stmt = stmt.where(Watch.user_id == user_id)
+            result = session.execute(stmt)
+            return result.rowcount > 0
 
     def mark_watch_notified(self, watch_id: int, price_cents: int | None) -> None:
         """Record the last notification price and timestamp for a watch.
@@ -1228,14 +1117,15 @@ class Repository:
         emails when the price has not dropped further since the last alert.
         """
         now = utc_now_iso()
-        with self.db._lock, self.db.connect() as conn:
-            conn.execute(
-                """
-                UPDATE watches
-                SET last_notified_price_cents = ?, last_notified_at = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (price_cents, now, now, watch_id),
+        with self.db.session() as session:
+            session.execute(
+                update(Watch)
+                .where(Watch.id == watch_id)
+                .values(
+                    last_notified_price_cents=price_cents,
+                    last_notified_at=now,
+                    updated_at=now,
+                )
             )
 
     # -------------------------------------------------------------------------
@@ -1260,85 +1150,149 @@ class Repository:
         """
         now = utc_now_iso()
         sent_at = now if status == "sent" else None
-        with self.db._lock, self.db.connect() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO notifications (
-                    watch_id, game_id, email, subject, body, status, reason,
-                    error, created_at, sent_at, user_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (watch_id, game_id, email, subject, body, status, reason, error, now, sent_at, user_id),
+        with self.db.session() as session:
+            notification = Notification(
+                watch_id=watch_id,
+                game_id=game_id,
+                email=email,
+                subject=subject,
+                body=body,
+                status=status,
+                reason=reason,
+                error=error,
+                created_at=now,
+                sent_at=sent_at,
+                user_id=user_id,
             )
-            return dict(
-                conn.execute("SELECT * FROM notifications WHERE id = ?", (cursor.lastrowid,)).fetchone()
-            )
+            session.add(notification)
+            session.flush()
+            return as_dict(session.get(Notification, notification.id))
 
     def list_notifications(self, limit: int = 50, user_id: int | None = None) -> list[dict]:
         """Return recent notification log entries joined with game name."""
-        with self.db.connect() as conn:
-            if user_id is None:
-                rows = conn.execute(
-                    """
-                    SELECT n.*, g.name AS game_name
-                    FROM notifications n
-                    LEFT JOIN games g ON g.id = n.game_id
-                    ORDER BY n.created_at DESC, n.id DESC
-                    LIMIT ?
-                    """,
-                    (limit,),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """
-                    SELECT n.*, g.name AS game_name
-                    FROM notifications n
-                    LEFT JOIN games g ON g.id = n.game_id
-                    WHERE n.user_id = ? AND COALESCE(n.reason, '') != 'system'
-                    ORDER BY n.created_at DESC, n.id DESC
-                    LIMIT ?
-                    """,
-                    (user_id, limit),
-                ).fetchall()
-            return [dict(row) for row in rows]
+        with self.db.session() as session:
+            stmt = (
+                select(Notification)
+                .add_columns(Game.name.label("game_name"))
+                .outerjoin(Game, Notification.game_id == Game.id)
+                .order_by(Notification.created_at.desc(), Notification.id.desc())
+                .limit(limit)
+            )
+            if user_id is not None:
+                stmt = stmt.where(
+                    Notification.user_id == user_id,
+                    func.coalesce(Notification.reason, "") != "system",
+                )
+            rows = session.execute(stmt).mappings().all()
+            return [as_dict(row) for row in rows]
 
     def delete_notification(self, notification_id: int, user_id: int | None = None) -> bool:
         """Delete one notification log row. Returns True when a row was deleted."""
-        with self.db._lock, self.db.connect() as conn:
-            if user_id is None:
-                cursor = conn.execute(
-                    "DELETE FROM notifications WHERE id = ?", (notification_id,)
-                )
-            else:
-                cursor = conn.execute(
-                    "DELETE FROM notifications WHERE id = ? AND user_id = ?",
-                    (notification_id, user_id),
-                )
-            return cursor.rowcount > 0
+        with self.db.session() as session:
+            stmt = delete(Notification).where(Notification.id == notification_id)
+            if user_id is not None:
+                stmt = stmt.where(Notification.user_id == user_id)
+            result = session.execute(stmt)
+            return result.rowcount > 0
 
     def delete_notifications(self, notification_ids: list[int], user_id: int | None = None) -> int:
         """Delete many notification rows at once. Returns the number deleted."""
         if not notification_ids:
             return 0
         unique_ids = list(dict.fromkeys(notification_ids))
-        with self.db._lock, self.db.connect() as conn:
-            placeholders = ",".join("?" * len(unique_ids))
-            if user_id is None:
-                cursor = conn.execute(
-                    f"DELETE FROM notifications WHERE id IN ({placeholders})",
-                    unique_ids,
-                )
-            else:
-                cursor = conn.execute(
-                    f"DELETE FROM notifications WHERE id IN ({placeholders}) AND user_id = ?",
-                    (*unique_ids, user_id),
-                )
-            return cursor.rowcount
+        with self.db.session() as session:
+            stmt = delete(Notification).where(Notification.id.in_(unique_ids))
+            if user_id is not None:
+                stmt = stmt.where(Notification.user_id == user_id)
+            result = session.execute(stmt)
+            return result.rowcount
 
 
 # -----------------------------------------------------------------------------
 # Module-level helpers — row hydration and serialization
 # -----------------------------------------------------------------------------
+
+
+def _game_lite_select(*, exclude_is_tracked: bool = False):
+    cols = [
+        Game.id,
+        Game.product_id,
+        Game.locale,
+        Game.name,
+        Game.image_url,
+        Game.store_url,
+        Game.currency,
+        Game.current_price_cents,
+        Game.current_price_formatted,
+        Game.original_price_cents,
+        Game.original_price_formatted,
+        Game.discount_text,
+        Game.availability,
+        Game.last_checked_at,
+        Game.last_error,
+        Game.discount_percent,
+    ]
+    if not exclude_is_tracked:
+        cols.append(Game.is_tracked)
+    cols.extend([Game.created_at, Game.updated_at])
+    return select(*cols)
+
+
+def _deals_filters(
+    *,
+    q: str | None,
+    platform: str | None,
+    min_discount: int | None,
+    max_price_cents: int | None,
+    on_sale_only: bool,
+) -> list:
+    filters = []
+    if on_sale_only:
+        filters.append(
+            or_(
+                and_(Game.discount_percent.isnot(None), Game.discount_percent > 0),
+                and_(
+                    Game.original_price_cents.isnot(None),
+                    Game.current_price_cents.isnot(None),
+                    Game.original_price_cents > Game.current_price_cents,
+                ),
+            )
+        )
+    if q:
+        filters.append(Game.name.ilike(f"%{q.strip()}%"))
+    if platform:
+        filters.append(Game.platforms.ilike(f'%"{platform}"%'))
+    if min_discount is not None and min_discount > 0:
+        filters.append(Game.discount_percent >= min_discount)
+    if max_price_cents is not None:
+        filters.append(Game.current_price_cents <= max_price_cents)
+    return filters
+
+
+def _deals_order_by(sort: str, sort_dir: str) -> list:
+    descending = sort_dir != "asc"
+    name_asc = func.lower(Game.name).asc()
+
+    def _col(column, *, nulls: bool = True):
+        ordered = column.desc() if descending else column.asc()
+        return ordered.nulls_last() if nulls else ordered
+
+    order_map = {
+        "popularity": [_col(Game.popularity_rank), name_asc],
+        "discount": [_col(Game.discount_percent), name_asc],
+        "savings": [_col(Game.original_price_cents - Game.current_price_cents)],
+        "savings_percent": [_col(Game.discount_percent), name_asc],
+        "price": [_col(Game.current_price_cents)],
+        "original": [_col(Game.original_price_cents)],
+        "name": [func.lower(Game.name).desc() if descending else name_asc],
+        "newest": [
+            Game.catalog_synced_at.desc() if descending else Game.catalog_synced_at.asc(),
+            Game.updated_at.desc() if descending else Game.updated_at.asc(),
+        ],
+        "rating": [_col(Game.rating_average), _col(Game.rating_count)],
+    }
+    return order_map.get(sort, order_map["discount"])
+
 
 def _hydrate_game_lite(row: dict) -> dict:
     """Lightweight hydration for library list rows.
@@ -1366,7 +1320,7 @@ def _dt_iso(value: datetime | None) -> str | None:
 def _hydrate_game(row: dict) -> dict:
     """Parse JSON list columns and normalize the tracked flag on full game rows.
 
-    SQLite stores list fields (genres, screenshots, etc.) as JSON text.
+    List fields (genres, screenshots, etc.) are stored as JSON text.
     This helper converts them back to Python lists for the API.
     """
     platforms = row.get("platforms")
@@ -1395,7 +1349,7 @@ def _hydrate_game(row: dict) -> dict:
 
 
 def _json_list(values: object) -> str | None:
-    """Serialize a Python list to a JSON string for SQLite storage, or None."""
+    """Serialize a Python list to a JSON string for storage, or None."""
     if not values:
         return None
     if isinstance(values, (list, tuple)):

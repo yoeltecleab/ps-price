@@ -8,7 +8,7 @@ This document explains how the Python backend works, written for developers who 
 
 PS Price is a **PlayStation Store price tracker**. The backend:
 
-1. **Syncs thousands of deals** from the PlayStation Store into a local SQLite database
+1. **Syncs thousands of deals** from the PlayStation Store into a local PostgreSQL database
 2. **Tracks games** you care about and records price history over time
 3. **Sends email alerts** when prices drop
 4. **Exposes a REST API** that the Next.js frontend calls
@@ -23,7 +23,7 @@ Think of it as three layers:
 ├─────────────────────────────────────────┤
 │  Data access            repository.py   │  ← SQL queries
 ├─────────────────────────────────────────┤
-│  SQLite database        database.py     │  ← Files on disk
+│  PostgreSQL             database.py     │  ← SQLAlchemy + Alembic
 └─────────────────────────────────────────┘
          ↑                          ↑
    ps_store.py              ps_graphql.py
@@ -40,7 +40,10 @@ backend/
 │   ├── main.py          # FastAPI app + HTTP routes
 │   ├── service.py       # Business logic (PriceService)
 │   ├── repository.py    # Database queries (Repository)
-│   ├── database.py      # SQLite setup + schema migrations
+│   ├── database.py      # Database facade (re-exports session layer)
+│   ├── db/
+│   │   ├── models.py    # SQLAlchemy ORM models
+│   │   └── session.py   # Engine, sessions, Alembic migrate()
 │   ├── schemas.py       # Pydantic models for API request/response JSON
 │   ├── domain.py        # Plain Python dataclasses (ProductSnapshot, SearchResult)
 │   ├── config.py        # Settings from environment variables
@@ -70,7 +73,7 @@ All configuration comes from **environment variables** prefixed with `PS_PRICE_`
 from backend.app.config import get_settings
 
 settings = get_settings()
-print(settings.database_path)   # default: backend/data/ps_price.sqlite3
+print(settings.database_url)
 print(settings.store_locale)      # default: en-us
 ```
 
@@ -78,7 +81,7 @@ Important settings:
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `PS_PRICE_DATABASE_PATH` | `backend/data/ps_price.sqlite3` | Where SQLite file lives |
+| `PS_PRICE_DATABASE_URL` | `postgresql+psycopg://...@localhost:5432/psprice` | PostgreSQL connection URL |
 | `PS_PRICE_STORE_LOCALE` | `en-us` | PlayStation Store region |
 | `PS_PRICE_SCHEDULER_ENABLED` | `true` | Background price checks |
 | `PS_PRICE_CHECK_INTERVAL_MINUTES` | `360` | How often to re-check tracked games |
@@ -86,25 +89,33 @@ Important settings:
 
 `get_settings()` is cached — call it anywhere; you always get the same object.
 
-### 2. Database (`database.py` + `app/db/`)
+### 2. Database (`app/db/` + Alembic)
 
-**Docker / production** uses **PostgreSQL** via `PS_PRICE_DATABASE_URL`. **Local pytest** defaults to **SQLite** (`PS_PRICE_DATABASE_PATH`) when no URL is set.
+**PostgreSQL only** via SQLAlchemy 2.0. Schema is defined in ORM models (`app/db/models.py`) and applied with Alembic migrations.
 
 ```python
-from backend.app.database import create_database, Database
+from backend.app.database import create_database
 from backend.app.config import get_settings
 
-db = create_database(get_settings())  # picks Postgres or SQLite from settings
-db.migrate()
+db = create_database(get_settings())
+db.migrate()  # alembic upgrade head
 
-with db.connect() as conn:
-    rows = conn.execute("SELECT * FROM games LIMIT 5").fetchall()
+with db.session() as session:
+  ...
 ```
 
-| Setting | When |
-|---------|------|
-| `PS_PRICE_DATABASE_URL` | Docker Compose, production (required when `PRODUCTION_MODE=true`) |
-| `PS_PRICE_DATABASE_PATH` | Local tests / CLI without Postgres |
+| Setting | Purpose |
+|---------|---------|
+| `PS_PRICE_DATABASE_URL` | `postgresql+psycopg://user:pass@host:5432/dbname` |
+
+**Migrations** (from `backend/` directory):
+
+```bash
+PS_PRICE_DATABASE_URL=postgresql+psycopg://... alembic upgrade head
+PS_PRICE_DATABASE_URL=postgresql+psycopg://... alembic revision --autogenerate -m "describe change"
+```
+
+**Tests** use database `psprice_test` (see `tests/conftest.py`).
 
 **Tables:**
 
@@ -233,7 +244,7 @@ game = await service.add_or_refresh_game("UP9000-CUSA07408_00-00000000GODOFWAR",
 
 **Search flow** (`search_unified`):
 
-1. Query local SQLite catalog by name or product ID
+1. Query local PostgreSQL catalog by name or product ID
 2. Results include games with and without active discounts once a catalog sync has run
 
 ### 7. API layer (`main.py`)
@@ -316,7 +327,7 @@ Browser  →  GET /api/search?q=007
            main.py  →  service.search_unified()
               ↓                    ↓
          store_client.search()   repo.search_catalog()
-         (live PS Store)         (local SQLite)
+         (live PS Store)         (local PostgreSQL)
               ↓                    ↓
            merge + dedupe by product_id
               ↓
@@ -382,7 +393,7 @@ uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
 pytest
 ```
 
-Tests use a temporary SQLite database and mock the PlayStation Store where needed.
+Tests use a dedicated PostgreSQL database (`psprice_test`) and mock the PlayStation Store where needed.
 
 ### CLI (manual store queries)
 
@@ -404,8 +415,8 @@ curl http://localhost:8000/api/sync-status
 
 In Docker Compose:
 
-- Database persists in volume `ps-price-data` at `/data/ps_price.sqlite3`
-- Backend listens on port `8000`
+- PostgreSQL persists in volume `ps-price-pg`
+- Backend listens on port `8000` (internal network only by default)
 - Frontend proxies `/api/*` to `http://backend:8000`
 
 First startup syncs ~4400 deals in the background (~45–60 seconds).
@@ -414,10 +425,18 @@ First startup syncs ~4400 deals in the background (~45–60 seconds).
 
 ## Common tasks for developers
 
+### Add a new column or table
+
+1. Update ORM model in `app/db/models.py`
+2. Generate migration: `alembic revision --autogenerate -m "describe change"`
+3. Apply: `alembic upgrade head`
+4. Update `repository.py` and `schemas.py` as needed
+5. Update frontend types if the field is exposed via API
+
 ### Add a new API field to games
 
-1. Add column in `database.py` → `_migrate_games_columns()`
-2. Update `repository.py` upsert methods
+1. Add column to `Game` model + Alembic migration
+2. Update `repository.py` upsert/query methods
 3. Add field to `GameOut` in `schemas.py`
 4. Update frontend `types.ts`
 
@@ -453,7 +472,8 @@ First startup syncs ~4400 deals in the background (~45–60 seconds).
 
 - [FastAPI documentation](https://fastapi.tiangolo.com/)
 - [Pydantic documentation](https://docs.pydantic.dev/)
-- [SQLite Python tutorial](https://docs.python.org/3/library/sqlite3.html)
+- [SQLAlchemy 2.0 documentation](https://docs.sqlalchemy.org/)
+- [Alembic documentation](https://alembic.sqlalchemy.org/)
 - Project API reference: `backend/docs/API.md`
 - Architecture overview: `docs/ARCHITECTURE.md`
 - Deployment: `docs/DEPLOYMENT.md`

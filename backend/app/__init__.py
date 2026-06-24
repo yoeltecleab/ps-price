@@ -10,7 +10,7 @@ the user is (``deps.py``), then calls either:
   - ``PriceService`` (``service.py``) for game/price/watch logic, or
   - ``AuthService`` (``auth_service.py``) for accounts and login.
 
-Both services use **repositories** to read/write SQLite:
+Both services use **repositories** to read/write PostgreSQL via SQLAlchemy:
 
   - ``Repository`` — games, catalog, watches, notifications
   - ``AuthRepository`` — users, sessions, passkeys

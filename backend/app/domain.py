@@ -6,7 +6,7 @@ These are plain Python objects that represent *business concepts* — a game
 price snapshot, a search result — separate from:
 
 - **HTTP/API layer** (``schemas.py`` — Pydantic models for JSON)
-- **Database layer** (SQLite rows as dicts)
+- **Database layer** (SQLAlchemy ORM models and rows)
 - **Scraping layer** (``ps_store.py`` / ``ps_graphql.py``)
 
 **Why ``@dataclass(frozen=True)``?**
@@ -22,7 +22,7 @@ price snapshot, a search result — separate from:
 
     PlayStationStoreClient.fetch_product()
         → ProductSnapshot
-        → PriceService saves to SQLite
+        → PriceService saves to PostgreSQL
         → API returns GameOut (Pydantic) to the browser
 
 Typical usage:

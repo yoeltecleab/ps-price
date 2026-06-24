@@ -9,11 +9,11 @@ Architecture (request flow)::
                      ↓                              ↓
               deps.py (who is logged in?)     repository.py (SQL)
                                                      ↓
-                                               SQLite database
+                                               PostgreSQL (SQLAlchemy)
 
 Startup (``lifespan``):
   1. Load settings and validate production security rules
-  2. Open SQLite and run migrations (create tables if needed)
+  2. Connect to PostgreSQL and run Alembic migrations
   3. Build service objects and store them on ``app.state``
   4. Start background ``PriceScheduler`` (periodic sync + price checks)
   5. On shutdown: stop scheduler and close HTTP client

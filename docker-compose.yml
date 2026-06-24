@@ -31,7 +31,7 @@ services:
       - path: .env
         required: false
     environment:
-      PS_PRICE_DATABASE_URL: postgresql://${POSTGRES_USER:-psprice}:${POSTGRES_PASSWORD:-psprice}@postgres:5432/${POSTGRES_DB:-psprice}
+      PS_PRICE_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-psprice}:${POSTGRES_PASSWORD:-psprice}@postgres:5432/${POSTGRES_DB:-psprice}
       PS_PRICE_CORS_ORIGINS: ${PS_PRICE_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       PS_PRICE_FEED_SYNC_INTERVAL_MINUTES: ${PS_PRICE_FEED_SYNC_INTERVAL_MINUTES:-60}
       PS_PRICE_SCHEDULER_ENABLED: ${PS_PRICE_SCHEDULER_ENABLED:-true}

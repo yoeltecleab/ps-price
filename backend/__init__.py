@@ -3,7 +3,7 @@
 This folder is the Python backend for the PS Price app. A "backend" is the
 server-side code that runs on your machine (or in the cloud) and talks to:
 
-  - The database (SQLite) where games, prices, and user data live
+  - The database (PostgreSQL) where games, prices, and user data live
   - The PlayStation Store (to fetch prices)
   - The frontend (Next.js) over HTTP JSON APIs
 
@@ -14,9 +14,10 @@ imports to see how data flows.
 Suggested reading order for beginners:
 
   1. ``app/config.py``       — settings from environment variables
-  2. ``app/database.py``     — SQLite tables and connections
-  3. ``app/main.py``         — HTTP API endpoints (FastAPI)
-  4. ``app/repository.py``   — SQL queries for games/watches
-  5. ``app/service.py``      — business rules (when to sync, notify, etc.)
-  6. ``app/auth_*.py``       — login, sessions, passkeys
+  2. ``app/database.py``     — database facade and session layer
+  3. ``app/db/models.py``    — SQLAlchemy ORM models
+  4. ``app/main.py``         — HTTP API endpoints (FastAPI)
+  5. ``app/repository.py``   — SQL queries for games/watches
+  6. ``app/service.py``      — business rules (when to sync, notify, etc.)
+  7. ``app/auth_*.py``       — login, sessions, passkeys
 """

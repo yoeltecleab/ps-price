@@ -34,6 +34,6 @@ def new_token() -> str:
 def hash_token(token: str) -> str:
     """One-way SHA-256 hash of a token for database storage.
 
-    We never store the raw session or verification token in SQLite.
+    We never store the raw session or verification token in the database.
     """
     return hashlib.sha256(token.encode("utf-8")).hexdigest()

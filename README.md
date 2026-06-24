@@ -15,12 +15,16 @@ On first deploy the **backend scheduler** syncs the full PlayStation catalog aut
 
 ## Local development
 
+Requires **PostgreSQL 16** (e.g. `docker compose up -d postgres` or a local install).
+
 **Backend** (Python 3.14+):
 
 ```bash
 cd backend
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+export PS_PRICE_DATABASE_URL=postgresql+psycopg://psprice:psprice@localhost:5432/psprice
+alembic upgrade head
 cd .. && uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 

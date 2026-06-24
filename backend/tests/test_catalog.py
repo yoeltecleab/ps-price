@@ -1,8 +1,5 @@
 """Tests for catalog/deals repository methods."""
 
-import tempfile
-
-from backend.app.database import Database
 from backend.app.domain import SearchResult
 from backend.app.repository import Repository
 
@@ -30,29 +27,26 @@ def _deal(
     )
 
 
-def test_upsert_catalog_and_list_deals():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db = Database(f"{tmpdir}/test.sqlite3")
-        db.migrate()
-        repo = Repository(db)
+def test_upsert_catalog_and_list_deals(temp_db):
+    repo = Repository(temp_db)
 
-        repo.upsert_catalog_entries([
-            _deal("UP0001-PPSA00001_00-GAMEONE", "Game One", 50, 2999, 5999),
-            _deal("UP0002-PPSA00002_00-GAMETWO", "Game Two", 0, 6999, 6999),
-        ])
+    repo.upsert_catalog_entries([
+        _deal("UP0001-PPSA00001_00-GAMEONE", "Game One", 50, 2999, 5999),
+        _deal("UP0002-PPSA00002_00-GAMETWO", "Game Two", 0, 6999, 6999),
+    ])
 
-        sale_items, sale_total = repo.list_deals(min_discount=10, on_sale_only=True)
-        assert sale_total == 1
+    sale_items, sale_total = repo.list_deals(min_discount=10, on_sale_only=True)
+    assert sale_total == 1
 
-        all_items, all_total = repo.list_deals(on_sale_only=False)
-        assert all_total == 2
+    all_items, all_total = repo.list_deals(on_sale_only=False)
+    assert all_total == 2
 
-        full_price, full_total = repo.list_deals(min_discount=0, on_sale_only=False)
-        assert full_total == 2
+    full_price, full_total = repo.list_deals(min_discount=0, on_sale_only=False)
+    assert full_total == 2
 
-        suggestions = repo.suggest_names("Game", limit=5)
-        assert len(suggestions) == 2
+    suggestions = repo.suggest_names("Game", limit=5)
+    assert len(suggestions) == 2
 
-        tracked = repo.mark_tracked(sale_items[0]["id"])
-        assert tracked is not None
-        assert tracked["is_tracked"] is True
+    tracked = repo.mark_tracked(sale_items[0]["id"])
+    assert tracked is not None
+    assert tracked["is_tracked"] is True

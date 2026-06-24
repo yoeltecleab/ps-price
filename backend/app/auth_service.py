@@ -6,7 +6,7 @@ Suggested reading order for the auth feature:
 
 1. ``auth_routes.py`` — HTTP: JSON in, cookies out.
 2. **This file** — rules: validate input, call repository, send emails.
-3. ``auth_repository.py`` — SQL: read/write SQLite tables.
+3. ``auth_repository.py`` — SQL: read/write PostgreSQL tables.
 
 Routes should stay thin (parse request, call service, map errors to status codes).
 This service owns *what should happen*; the repository owns *how rows are stored*.
@@ -163,7 +163,7 @@ class AuthService:
         user_agent: str | None = None,
         ip_address: str | None = None,
     ) -> tuple[str, str]:
-        """Create access + refresh JWT pair and persist refresh ``jti`` in SQLite."""
+        """Create access + refresh JWT pair and persist refresh ``jti`` in PostgreSQL."""
         jti = new_token()
         self.auth_repo.create_refresh_session(
             user["id"],
@@ -635,12 +635,8 @@ class AuthService:
             JSON-serializable WebAuthn registration options for the frontend.
         """
         exclude: list[PublicKeyCredentialDescriptor] = []
-        with self.auth_repo.db.connect() as conn:
-            rows = conn.execute(
-                "SELECT credential_id FROM passkey_credentials WHERE user_id = ?",
-                (user["id"],),
-            ).fetchall()
-        exclude = [PublicKeyCredentialDescriptor(id=row["credential_id"]) for row in rows]
+        credential_ids = self.auth_repo.list_passkey_credential_ids(user["id"])
+        exclude = [PublicKeyCredentialDescriptor(id=cid) for cid in credential_ids]
         rp_id = effective_rp_id(self.settings)
         options = generate_registration_options(
             rp_id=rp_id,
@@ -803,12 +799,10 @@ class AuthService:
 
     def _credential_descriptors(self, user_id: int) -> list[PublicKeyCredentialDescriptor]:
         """Build WebAuthn allow-list entries from stored credential ids."""
-        with self.auth_repo.db.connect() as conn:
-            rows = conn.execute(
-                "SELECT credential_id FROM passkey_credentials WHERE user_id = ?",
-                (user_id,),
-            ).fetchall()
-        return [PublicKeyCredentialDescriptor(id=row["credential_id"]) for row in rows]
+        return [
+            PublicKeyCredentialDescriptor(id=cid)
+            for cid in self.auth_repo.list_passkey_credential_ids(user_id)
+        ]
 
     def _serialize_registration_options(self, options) -> dict[str, Any]:
         """Convert library WebAuthn options to JSON the browser understands (base64url)."""

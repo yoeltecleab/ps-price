@@ -170,7 +170,7 @@ class PriceService:
     # -------------------------------------------------------------------------
 
     async def sync_catalog(self, locale: str | None = None, force: bool = False) -> dict:
-        """Pull the full PS Store catalog into SQLite (all games, sale or not)."""
+        """Pull the full PS Store catalog into PostgreSQL (all games, sale or not)."""
         active_locale = normalize_locale(locale or self.settings.store_locale)
         tracked_before = {
             g["id"]: g.get("current_price_cents")

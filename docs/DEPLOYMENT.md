@@ -1,6 +1,6 @@
 # Deployment Guide
 
-PS Price ships as two Docker containers (FastAPI backend + Next.js frontend) with a shared SQLite database on a persistent volume. This guide covers local Docker deployment, production hardening, and a complete **AWS** deployment path.
+PS Price ships as three Docker services (PostgreSQL, FastAPI backend, Next.js frontend). The backend uses **SQLAlchemy 2.0 + Alembic** against PostgreSQL. This guide covers local Docker deployment, production hardening, and a complete **AWS** deployment path.
 
 ---
 
@@ -37,18 +37,18 @@ PS Price ships as two Docker containers (FastAPI backend + Next.js frontend) wit
      └─────────────────┘                    └──────────┬─────────┘
                                                        │
                                               ┌────────▼─────────┐
-                                              │  EBS volume      │
-                                              │  /data/*.sqlite3 │
+                                              │  PostgreSQL 16   │
+                                              │  volume ps-price-pg │
                                               └──────────────────┘
 ```
 
-**Important:** The backend uses **SQLite**. Run **one backend instance** with a **local block volume** (EBS on EC2, or a single ECS task with an attached EBS volume). Do **not** mount SQLite on EFS/NFS — file locking will corrupt the database.
+**Important:** Run **one backend instance** against **one PostgreSQL database**. Schema is managed by **Alembic** (`alembic upgrade head` on startup). Do not point multiple backends at the same DB without understanding connection pooling limits.
 
 | Component | Port | Role |
 |-----------|------|------|
-| Frontend | 3000 | Web UI; proxies `/api/*` and `/healthz` to backend |
+| Frontend | 3000 | Web UI; proxies `/api/*` to backend |
 | Backend | 8000 | REST API, catalog sync, scheduler, email notifications |
-| SQLite | — | `/data/ps_price.sqlite3` on persistent volume |
+| PostgreSQL | 5432 | Primary data store (Docker volume `ps-price-pg`) |
 
 ---
 
@@ -71,21 +71,21 @@ cp .env.example .env
 
 docker compose up --build -d
 
-# Verify
-curl http://127.0.0.1:8000/healthz
+# Verify (frontend proxies API; backend is internal-only in default compose)
+curl http://127.0.0.1:3000/healthz
 curl http://127.0.0.1:3000
 ```
 
 | URL | Service |
 |-----|---------|
 | http://127.0.0.1:3000 | Web app |
-| http://127.0.0.1:8000/docs | OpenAPI docs |
+| http://127.0.0.1:5432 | PostgreSQL (local IntelliJ / psql; optional) |
 
 On first launch the backend scheduler syncs the full PlayStation catalog (10,000+ titles). This can take 5–15 minutes. Watch progress:
 
 ```bash
 docker compose logs -f backend
-curl http://127.0.0.1:8000/api/sync-status
+curl http://127.0.0.1:3000/api/sync-status
 ```
 
 ### Management
@@ -104,9 +104,8 @@ docker compose down
 # Rebuild after code changes
 docker compose up --build -d
 
-# Reset database (destructive)
-docker compose down
-docker volume rm ps-price_ps-price-data
+# Reset database (destructive — wipes Postgres volume)
+docker compose down -v
 docker compose up -d
 ```
 
@@ -150,8 +149,8 @@ The section below documents an **ALB + ACM + Route 53** setup for teams that nee
 
 | Service | Purpose |
 |---------|---------|
-| **EC2** | Runs Docker Compose (backend + frontend) |
-| **EBS** | Persistent SQLite database at `/data` |
+| **EC2** | Runs Docker Compose (postgres + backend + frontend) |
+| **EBS** | Optional host bind-mount for Postgres data (`/data/postgres`) |
 | **ALB** | HTTPS termination, path-based routing |
 | **ACM** | Free TLS certificate |
 | **Route 53** | DNS A/alias record |
@@ -195,16 +194,15 @@ Create a separate `ps-price-alb-sg` allowing inbound 443/80 from the internet an
 
 1. **AMI:** Ubuntu 24.04 LTS (or Amazon Linux 2023)
 2. **Instance type:** `t3.small` (2 vCPU, 2 GB RAM) — sufficient for catalog sync + web UI
-3. **Storage:** 30 GB gp3 root volume + **20 GB gp3 EBS** data volume (for `/data`)
+3. **Storage:** 30 GB gp3 root volume; optionally add **20 GB gp3 EBS** for Postgres data (`/data/postgres`)
 4. **Security group:** `ps-price-sg`
 5. **IAM role:** attach a role with `AmazonSSMManagedInstanceCore` (for Session Manager, no SSH keys required)
-6. **User data** (cloud-init) — install Docker and mount the data volume:
+6. **User data** (cloud-init) — install Docker (optional: mount EBS for Postgres):
 
 ```bash
 #!/bin/bash
 set -euxo pipefail
 
-# Install Docker
 apt-get update
 apt-get install -y ca-certificates curl gnupg
 install -m 0755 -d /etc/apt/keyrings
@@ -214,21 +212,29 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.
 apt-get update
 apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin git
 
-# Mount persistent data volume (adjust device if not /dev/xvdf)
+# Optional: persistent Postgres on host (adjust device if not /dev/xvdf)
 DATA_DEV=/dev/xvdf
-mkdir -p /data
+mkdir -p /data/postgres
 if ! blkid "$DATA_DEV"; then mkfs.ext4 "$DATA_DEV"; fi
-grep -q '/data ext4' /etc/fstab || echo "$DATA_DEV /data ext4 defaults,nofail 0 2" >> /etc/fstab
+grep -q '/data/postgres ext4' /etc/fstab || echo "$DATA_DEV /data/postgres ext4 defaults,nofail 0 2" >> /etc/fstab
 mount -a
-chown -R 1000:1000 /data || true
+chown -R 999:999 /data/postgres || true
 
-# Clone app (or pull from ECR in CI/CD workflows)
 cd /opt
 git clone https://github.com/yoeltecleab/ps-price.git
 cd ps-price
 ```
 
-> **Device name:** On Nitro instances the data volume may appear as `/dev/nvme1n1`. Check with `lsblk` after launch and update the user-data script accordingly.
+> **Device name:** On Nitro instances the data volume may appear as `/dev/nvme1n1`. Check with `lsblk` after launch.
+
+To use the host Postgres directory, add to `docker-compose.yml` on the server:
+
+```yaml
+services:
+  postgres:
+    volumes:
+      - /data/postgres:/var/lib/postgresql/data
+```
 
 ### Step 5 — Configure production environment
 
@@ -243,8 +249,11 @@ nano .env
 **Production `.env` example:**
 
 ```env
-# Database — must match docker-compose volume mount
-PS_PRICE_DATABASE_PATH=/data/ps_price.sqlite3
+# PostgreSQL — Docker Compose sets PS_PRICE_DATABASE_URL for the backend automatically.
+# Change POSTGRES_* here; keep passwords strong in production.
+POSTGRES_USER=psprice
+POSTGRES_PASSWORD=CHANGE_ME_STRONG_PASSWORD
+POSTGRES_DB=psprice
 
 # PlayStation Store
 PS_PRICE_STORE_LOCALE=en-us
@@ -271,15 +280,6 @@ PS_PRICE_SMTP_USE_SSL=false
 PS_PRICE_NOTIFICATION_FROM_EMAIL=alerts@yourdomain.com
 ```
 
-Update `docker-compose.yml` on the server so the backend volume uses the host path:
-
-```yaml
-services:
-  backend:
-    volumes:
-      - /data:/data
-```
-
 The frontend container needs the backend reachable on the Docker network (default `INTERNAL_API_URL=http://backend:8000` — already set in the frontend Dockerfile).
 
 Start the stack:
@@ -287,19 +287,19 @@ Start the stack:
 ```bash
 docker compose up --build -d
 docker compose ps
-curl -s http://localhost:8000/healthz
+docker compose exec backend curl -s http://localhost:8000/healthz
 ```
 
-The backend scheduler starts a full catalog sync automatically when the container starts. Monitor progress:
+The backend runs Alembic migrations on startup, then the scheduler syncs the full PlayStation catalog. Monitor progress:
 
 ```bash
-curl -s http://localhost:8000/api/sync-status
+curl -s http://localhost:3000/api/sync-status
 ```
 
-To force a manual re-sync:
+To force a manual re-sync (from the host, via frontend proxy):
 
 ```bash
-curl -X POST http://localhost:8000/api/sync-deals
+curl -X POST http://localhost:3000/api/sync-deals
 ```
 
 ### Step 6 — Create an Application Load Balancer
@@ -380,27 +380,26 @@ services:
 | Instance status | `StatusCheckFailed` | ≥ 1 for 2 min |
 | ALB unhealthy hosts | `UnHealthyHostCount` | ≥ 1 for 5 min |
 | ALB 5xx | `HTTPCode_Target_5XX_Count` | > 10 in 5 min |
-| Disk usage | Custom agent metric | > 80% on `/data` |
+| Disk usage | Custom agent metric | > 80% on Postgres data volume |
 
 ### Step 11 — Backups on AWS
 
-**Automated EBS snapshots** (recommended):
+**Automated EBS snapshots** (if Postgres data is on a dedicated EBS volume):
 
 ```bash
-# Daily snapshot via EventBridge + Lambda, or AWS Backup
 aws ec2 create-snapshot \
   --volume-id vol-xxxxxxxx \
-  --description "ps-price daily backup $(date +%F)"
+  --description "ps-price postgres daily $(date +%F)"
 ```
 
-**Logical SQL dump** (portable):
+**Logical SQL dump** (portable, recommended):
 
 ```bash
-docker compose exec backend sqlite3 /data/ps_price.sqlite3 ".backup /data/backup.sqlite3"
-aws s3 cp /data/backup.sqlite3 s3://your-backup-bucket/ps-price/$(date +%F).sqlite3
+docker compose exec -T postgres pg_dump -U psprice psprice | gzip > "psprice-$(date +%F).sql.gz"
+aws s3 cp "psprice-$(date +%F).sql.gz" s3://your-backup-bucket/ps-price/
 ```
 
-Retain 7 daily + 4 weekly snapshots.
+Retain 7 daily + 4 weekly snapshots or dumps.
 
 ### Step 12 — Deploying updates
 
@@ -416,13 +415,13 @@ For zero-downtime on a single instance, use a blue/green second instance behind 
 
 ### Alternative: ECS Fargate (advanced)
 
-Use Fargate only if you attach an **EBS volume to a single task** (Fargate EBS support) — still one backend replica. SQLite does not work on EFS.
+For ECS, run **PostgreSQL on RDS** or as a single-container task with an **EBS volume** for `/var/lib/postgresql/data`. Do not use EFS for Postgres data files.
 
 High-level steps:
 
 1. Push images to **ECR** (`ps-price-backend`, `ps-price-frontend`).
-2. Create an ECS cluster with one service per container, or a multi-container task definition.
-3. Mount an EBS volume at `/data` on the backend container.
+2. Create an ECS cluster with services for postgres (or use RDS), backend, and frontend.
+3. Set `PS_PRICE_DATABASE_URL` to the RDS or task Postgres endpoint.
 4. Set `PS_PRICE_SCHEDULER_ENABLED=true` on exactly **one** backend task.
 5. Point the ALB to the ECS service(s) with the same path rules as above.
 
@@ -436,7 +435,7 @@ This adds complexity without benefit for most personal deployments — **EC2 + C
 | CORS errors in browser | `PS_PRICE_CORS_ORIGINS` mismatch | Set to exact `https://your-domain` |
 | Catalog empty | Initial sync not finished | `POST /api/sync-deals`, watch logs |
 | Emails `skipped` | SMTP not configured | Set SES SMTP vars, restart backend |
-| Database corruption | Multiple backends on shared NFS | Run **one** backend; use EBS only |
+| Database connection errors | Wrong `POSTGRES_*` or URL | Check `docker compose logs postgres backend` |
 | Sync slow / timeouts | Instance too small | Upgrade to `t3.medium` during first sync |
 
 ---
@@ -451,7 +450,10 @@ cp .env.example .env
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PS_PRICE_DATABASE_PATH` | `data/ps_price.sqlite3` | SQLite file path (use `/data/...` in Docker) |
+| `POSTGRES_USER` | `psprice` | Postgres role (Docker Compose) |
+| `POSTGRES_PASSWORD` | `psprice` | Postgres password — **change in production** |
+| `POSTGRES_DB` | `psprice` | Database name |
+| `PS_PRICE_DATABASE_URL` | (set by Compose) | SQLAlchemy URL (`postgresql+psycopg://...`) — override for host-run backend |
 | `PS_PRICE_STORE_LOCALE` | `en-us` | PlayStation Store locale |
 | `PS_PRICE_SCHEDULER_ENABLED` | `true` | Background catalog sync scheduler |
 | `PS_PRICE_CHECK_INTERVAL_MINUTES` | `360` | How often tracked library games are considered "due" |
@@ -474,7 +476,8 @@ Verify loaded config:
 
 ```bash
 docker compose exec backend env | grep PS_PRICE
-curl http://127.0.0.1:8000/healthz?scheduler=true
+curl http://127.0.0.1:3000/healthz
+docker compose exec backend curl -s "http://localhost:8000/healthz?scheduler=true" -H "x-ps-price-internal: YOUR_INTERNAL_KEY"
 ```
 
 ---
@@ -526,32 +529,38 @@ PS_PRICE_NOTIFICATION_FROM_EMAIL=alerts@yourdomain.com
 ### Backup
 
 ```bash
-# SQL dump
-docker compose exec backend sqlite3 /data/ps_price.sqlite3 ".dump" > backup.sql
+# Compressed SQL dump (recommended)
+docker compose exec -T postgres pg_dump -U psprice psprice | gzip > "psprice-$(date +%F).sql.gz"
 
-# File copy (preferred for large DBs)
-docker compose exec backend sqlite3 /data/ps_price.sqlite3 ".backup /data/backup.sqlite3"
-docker cp ps-price-backend:/data/backup.sqlite3 ./ps_price_backup.sqlite3
+# Plain SQL
+docker compose exec -T postgres pg_dump -U psprice psprice > backup.sql
 ```
 
 ### Restore
 
 ```bash
 docker compose down
-docker cp ./ps_price_backup.sqlite3 ps-price-backend:/data/ps_price.sqlite3
-# Or on EC2:
-cp /data/backup.sqlite3 /data/ps_price.sqlite3
+docker compose up -d postgres
+# Wait for postgres healthy, then:
+gunzip -c psprice-2026-06-22.sql.gz | docker compose exec -T postgres psql -U psprice psprice
 docker compose up -d
 ```
 
 ### Inspect
 
 ```bash
-docker compose exec backend sqlite3 /data/ps_price.sqlite3
-.tables
-SELECT COUNT(*) FROM games;
-SELECT COUNT(*) FROM games WHERE is_tracked = 1;
-.quit
+docker compose exec postgres psql -U psprice psprice -c "\dt"
+docker compose exec postgres psql -U psprice psprice -c "SELECT COUNT(*) FROM games;"
+docker compose exec postgres psql -U psprice psprice -c "SELECT COUNT(*) FROM games WHERE is_tracked = 1;"
+```
+
+### Schema migrations
+
+Alembic runs automatically on backend startup. To run manually:
+
+```bash
+docker compose exec backend alembic upgrade head
+docker compose exec backend alembic current
 ```
 
 ---
@@ -559,19 +568,24 @@ SELECT COUNT(*) FROM games WHERE is_tracked = 1;
 ## Monitoring & Health Checks
 
 ```bash
-curl http://127.0.0.1:8000/healthz
-curl http://127.0.0.1:8000/healthz?scheduler=true
-curl http://127.0.0.1:8000/api/sync-status
+curl http://127.0.0.1:3000/healthz
+docker compose exec backend curl -s "http://localhost:8000/healthz?scheduler=true" -H "x-ps-price-internal: YOUR_INTERNAL_KEY"
+curl http://127.0.0.1:3000/api/sync-status
 ```
 
 Example response:
 
 ```json
 {
+  "status": "ok"
+}
+```
+
+With `?scheduler=true` and a valid internal key:
+
+```json
+{
   "status": "ok",
-  "app": "PS Price",
-  "database_path": "/data/ps_price.sqlite3",
-  "email_configured": true,
   "scheduler_running": true,
   "scheduler_enabled": true
 }
@@ -599,7 +613,7 @@ docker compose up -d
 
 ```bash
 docker ps
-curl -v http://127.0.0.1:8000/healthz
+curl -v http://127.0.0.1:3000/healthz
 docker inspect ps-price-backend | grep -A 5 Health
 ```
 
@@ -607,7 +621,7 @@ docker inspect ps-price-backend | grep -A 5 Health
 
 ```bash
 docker compose exec backend env | grep SMTP
-curl "http://127.0.0.1:8000/api/notifications?limit=10"
+curl "http://127.0.0.1:3000/api/notifications?limit=10"
 # Look for status: "skipped" (SMTP not configured) or "failed" (bad credentials)
 ```
 
@@ -629,15 +643,16 @@ PS_PRICE_REQUEST_MIN_INTERVAL_SECONDS=5
 ## Production Checklist
 
 - [ ] `.env` configured with production values (no secrets in git)
+- [ ] `POSTGRES_PASSWORD` and `PS_PRICE_JWT_SECRET` are strong, unique values
 - [ ] `PS_PRICE_CORS_ORIGINS` matches your public HTTPS origin
-- [ ] Persistent `/data` volume on EBS (not ephemeral root disk)
-- [ ] **Single** backend instance (SQLite constraint)
+- [ ] Postgres data on persistent storage (Docker volume or EBS bind-mount)
+- [ ] **Single** backend instance with scheduler enabled
 - [ ] ALB + ACM certificate active, HTTP → HTTPS redirect
 - [ ] Route 53 DNS pointing to ALB
 - [ ] Initial catalog sync completed (`catalog_total` > 1000)
 - [ ] SES domain verified, production access granted
 - [ ] Test watch email delivers successfully
-- [ ] EBS snapshot or S3 backup schedule configured
+- [ ] `pg_dump` or EBS snapshot backup schedule configured
 - [ ] CloudWatch alarms for unhealthy targets and disk usage
 - [ ] Security group: SSH restricted to your IP (or use SSM only)
 - [ ] `git pull && docker compose up --build -d` update procedure documented for your team

@@ -31,8 +31,9 @@ export interface AdminOverview {
     smtp_configured: boolean;
     store_locale: string;
     production_mode: boolean;
+    database_backend: string;
     database_bytes: number;
-    database_path: string;
+    database_url_set: boolean;
     rate_limit_buckets: number;
     check_interval_minutes: number;
     feed_sync_interval_minutes: number;

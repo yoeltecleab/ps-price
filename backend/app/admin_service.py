@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from backend.app.auth_repository import AuthRepository
 from backend.app.auth_service import AuthService
 from backend.app.config import Settings
@@ -56,7 +54,6 @@ class AdminService:
                 "production_mode": self.settings.production_mode,
                 "database_backend": db_info["backend"],
                 "database_bytes": db_info["bytes"],
-                "database_path": db_info["path"],
                 "database_url_set": db_info["url_set"],
                 "rate_limit_buckets": rate_limiter.active_bucket_count(),
                 "check_interval_minutes": self.settings.check_interval_minutes,
@@ -65,24 +62,14 @@ class AdminService:
         }
 
     def _database_info(self) -> dict:
-        if self.settings.database_url:
-            with self.repo.db.connect() as conn:
-                row = conn.execute(
-                    "SELECT pg_database_size(current_database()) AS size"
-                ).fetchone()
-            size = row[0]
-            return {
-                "backend": "postgresql",
-                "bytes": int(size),
-                "path": "",
-                "url_set": True,
-            }
-        db_path = Path(self.settings.database_path)
+        from sqlalchemy import text
+
+        with self.repo.db.session() as session:
+            size = session.scalar(text("SELECT pg_database_size(current_database())"))
         return {
-            "backend": "sqlite",
-            "bytes": db_path.stat().st_size if db_path.exists() else 0,
-            "path": str(db_path),
-            "url_set": False,
+            "backend": "postgresql",
+            "bytes": int(size or 0),
+            "url_set": bool(self.settings.database_url),
         }
 
     def insights(self) -> dict:

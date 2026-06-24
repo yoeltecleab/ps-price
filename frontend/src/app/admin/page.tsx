@@ -726,7 +726,7 @@ export default function AdminDashboardPage() {
               ["Production", overview.system.production_mode ? "On" : "Off"],
               ["SMTP", overview.system.smtp_configured ? "Configured" : "Missing"],
               ["Locale", overview.system.store_locale],
-              ["DB size", fmtBytes(overview.system.database_bytes)],
+              ["DB", `${overview.system.database_backend} · ${fmtBytes(overview.system.database_bytes)}`],
               ["Rate buckets", String(overview.system.rate_limit_buckets)],
               ["Check interval", `${overview.system.check_interval_minutes}m`],
               ["Feed sync", `${overview.system.feed_sync_interval_minutes}m`],
@@ -746,7 +746,9 @@ export default function AdminDashboardPage() {
             >
               Ping sync status
             </Button>
-            <p className="text-xs text-muted font-data break-all">{overview.system.database_path}</p>
+            <p className="text-xs text-muted font-data">
+              PostgreSQL{overview.system.database_url_set ? "" : " (default URL)"}
+            </p>
           </div>
         </section>
       ) : null}

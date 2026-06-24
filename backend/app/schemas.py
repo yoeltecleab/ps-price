@@ -13,7 +13,7 @@ FastAPI uses **Pydantic** models to:
 - ``domain.py`` — internal Python dataclasses used between backend modules.
 - ``schemas.py`` — **wire format** matching what the frontend expects.
 
-Field names intentionally mirror SQLite column names so repository rows map
+Field names intentionally mirror database column names so repository rows map
 cleanly: ``GameOut(**row)``.
 
 **Common patterns here**
@@ -199,7 +199,7 @@ class WatchOut(BaseModel):
     """Representation of a stored watch returned by the API.
 
     Note: ``enabled`` and ``notify_on_any_drop`` are stored as integers (0/1)
-    in SQLite but exposed here as ints for JSON compatibility.
+    in the database but exposed here as ints for JSON compatibility.
     """
     id: int
     game_id: int

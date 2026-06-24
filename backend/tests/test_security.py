@@ -36,6 +36,7 @@ def test_production_settings_validation() -> None:
     with pytest.raises(RuntimeError, match="DATABASE_URL"):
         Settings(
             production_mode=True,
+            database_url="",
             admin_emails="admin@example.com",
             cookie_secure=True,
             frontend_url="https://psprice.example.com",
