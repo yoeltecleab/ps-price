@@ -520,7 +520,7 @@ PS_PRICE_CORS_ORIGINS=https://your-domain.com
 - [ ] `PS_PRICE_COOKIE_SECURE=true` — JWT cookies only sent over HTTPS
 - [ ] `PS_PRICE_JWT_SECRET` — random string ≥32 chars (`openssl rand -base64 48`)
 - [ ] `PS_PRICE_INTERNAL_API_KEY` — same value as `INTERNAL_API_KEY` on the frontend container; ≥32 chars, not the dev default
-- [ ] `PS_PRICE_ADMIN_EMAILS` — comma-separated verified account emails allowed to run manual catalog sync (`POST /api/sync-deals`) and scheduler refresh
+- [ ] `PS_PRICE_CORS_ORIGINS=https://your-domain.com` — also sets frontend `ALLOWED_API_ORIGINS` via docker-compose (blocks cross-site `/api` scraping)
 - [ ] `PS_PRICE_WEBAUTHN_RP_ID` matches your public hostname (no port, no scheme)
 - [ ] `PS_PRICE_WEBAUTHN_ORIGIN` matches the browser origin users sign in from
 - [ ] SMTP configured for account verification, password reset, and price alerts

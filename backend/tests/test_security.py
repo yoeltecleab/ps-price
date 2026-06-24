@@ -97,6 +97,7 @@ def test_healthz_scheduler_requires_internal_key() -> None:
     from fastapi.testclient import TestClient
 
     from backend.app.main import app
+    from backend.app.security import API_CLIENT_HEADER, API_CLIENT_VALUE
 
     app.state.settings = Settings(
         internal_api_key="test-internal-api-key-at-least-32-characters",
@@ -112,10 +113,44 @@ def test_healthz_scheduler_requires_internal_key() -> None:
     assert client.get("/healthz?scheduler=true").status_code == 403
     ok = client.get(
         "/healthz?scheduler=true",
-        headers={"X-PS-Price-Internal": "test-internal-api-key-at-least-32-characters"},
+        headers={
+            "X-PS-Price-Internal": "test-internal-api-key-at-least-32-characters",
+            API_CLIENT_HEADER: API_CLIENT_VALUE,
+        },
     )
     assert ok.status_code == 200
     assert "scheduler_running" in ok.json()
+
+
+def test_api_requires_proxy_headers_when_internal_key_configured() -> None:
+    from fastapi.testclient import TestClient
+
+    from backend.app.main import app
+    from backend.app.security import API_CLIENT_HEADER, API_CLIENT_VALUE
+
+    app.state.settings = Settings(
+        internal_api_key="test-internal-api-key-at-least-32-characters",
+        production_mode=False,
+        cors_origins="http://localhost:3000",
+    )
+    client = TestClient(app)
+
+    assert client.get("/api/deals").status_code == 403
+
+    with_key_only = client.get(
+        "/api/deals",
+        headers={"X-PS-Price-Internal": "test-internal-api-key-at-least-32-characters"},
+    )
+    assert with_key_only.status_code == 403
+
+    ok = client.get(
+        "/api/deals",
+        headers={
+            "X-PS-Price-Internal": "test-internal-api-key-at-least-32-characters",
+            API_CLIENT_HEADER: API_CLIENT_VALUE,
+        },
+    )
+    assert ok.status_code == 200
 
 
 def test_production_rejects_weak_internal_api_key() -> None:

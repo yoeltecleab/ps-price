@@ -1,3 +1,5 @@
+import { applyApiClientHeaders } from "@/lib/apiClient";
+
 export class ApiError extends Error {
   status: number;
 
@@ -30,7 +32,13 @@ const AUTH_PATHS = [
 ];
 
 async function tryRefreshAccessToken(): Promise<boolean> {
-  const res = await fetch("/api/auth/refresh", { method: "POST", credentials: "include" });
+  const headers = new Headers();
+  applyApiClientHeaders(headers);
+  const res = await fetch("/api/auth/refresh", {
+    method: "POST",
+    credentials: "include",
+    headers,
+  });
   return res.ok;
 }
 
@@ -39,6 +47,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   if (init?.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
+  applyApiClientHeaders(headers);
 
   const fetchOpts: RequestInit = { ...init, headers, credentials: "include" };
   let res = await fetch(path, fetchOpts);

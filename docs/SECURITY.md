@@ -36,12 +36,22 @@ Internet → :443 Caddy → frontend:3000 → backend:8000 (Docker network only)
 
 ## Internal API key
 
-The Next.js server adds `X-PS-Price-Internal` on every proxied `/api/*` request.
+The backend is **not** reachable on the public internet. Only the Next.js server talks to it on the Docker network.
+
+Two headers must be present on every `/api/*` request the backend accepts:
+
+| Header | Set by | Purpose |
+|--------|--------|---------|
+| `X-PS-Price-Internal` | Next.js proxy (server-side only) | Shared secret; never exposed to the browser |
+| `X-PS-Price-Client: 1` | Next.js proxy on upstream; browser sends `1` to the proxy first | Blocks address-bar `/api/...` visits and direct backend calls |
+
+The browser `fetch()` in `frontend/src/lib/api.ts` sends `X-PS-Price-Client`. The production proxy rejects requests without it (and blocks `Sec-Fetch-Mode: navigate`).
 
 | Variable | Where |
 |----------|--------|
 | `PS_PRICE_INTERNAL_API_KEY` | Backend `.env` |
 | `INTERNAL_API_KEY` | Frontend container env (same value) |
+| `ALLOWED_API_ORIGINS` | Frontend container — usually same as `PS_PRICE_CORS_ORIGINS` |
 
 **Production requirements** (`PS_PRICE_PRODUCTION_MODE=true`):
 

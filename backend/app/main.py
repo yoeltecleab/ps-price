@@ -53,8 +53,10 @@ from backend.app.rate_limit import rate_limiter
 from backend.app.scheduler import PriceScheduler
 from backend.app.security import (
     MAX_REQUEST_BODY_BYTES,
+    API_CLIENT_HEADER,
     api_security_headers,
     internal_key_valid,
+    proxy_client_valid,
 )
 from backend.app.schemas import (
     BulkDeleteNotifications,
@@ -161,7 +163,7 @@ def _settings_for_request(request: Request) -> Settings:
 
 
 class InternalAPIKeyMiddleware(BaseHTTPMiddleware):
-    """Reject direct API access unless the internal proxy key is presented."""
+    """Reject direct API access unless the Next.js proxy forwarded the request."""
 
     async def dispatch(self, request: Request, call_next):
         settings = _settings_for_request(request)
@@ -169,6 +171,8 @@ class InternalAPIKeyMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         if settings.production_mode or settings.internal_api_key:
             if not internal_key_valid(settings, request.headers.get("x-ps-price-internal")):
+                return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+            if not proxy_client_valid(request.headers.get(API_CLIENT_HEADER)):
                 return JSONResponse(status_code=403, content={"detail": "Forbidden"})
         return await call_next(request)
 

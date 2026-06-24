@@ -64,6 +64,7 @@ services:
     environment:
       INTERNAL_API_URL: http://backend:8000
       INTERNAL_API_KEY: ${PS_PRICE_INTERNAL_API_KEY:-ps-price-local-proxy-key}
+      ALLOWED_API_ORIGINS: ${PS_PRICE_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
     depends_on:
       backend:
         condition: service_healthy

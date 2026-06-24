@@ -11,6 +11,10 @@ from urllib.parse import urlparse
 # Default dev-only proxy key — must never be used when PS_PRICE_PRODUCTION_MODE=true.
 DEV_INTERNAL_API_KEY = "ps-price-local-proxy-key"
 
+# Set by the Next.js proxy on upstream requests; blocks direct backend access with only the internal key.
+API_CLIENT_HEADER = "x-ps-price-client"
+API_CLIENT_VALUE = "1"
+
 # Headers the Next.js proxy may forward to the backend.
 PROXY_ALLOWED_REQUEST_HEADERS = frozenset(
     {
@@ -50,6 +54,11 @@ def internal_key_valid(settings, provided: str | None) -> bool:
     if not settings.internal_api_key:
         return False
     return bool(provided and provided == settings.internal_api_key)
+
+
+def proxy_client_valid(provided: str | None) -> bool:
+    """Return True when the request was forwarded by the Next.js API proxy."""
+    return provided == API_CLIENT_VALUE
 
 
 def api_security_headers(*, production_mode: bool) -> dict[str, str]:
