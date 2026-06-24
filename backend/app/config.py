@@ -106,6 +106,7 @@ class Settings(BaseSettings):
     cookie_secure: bool = False  # set True in production (HTTPS only cookies)
     production_mode: bool = False  # enables strict startup checks
     admin_emails: str = ""  # comma-separated emails allowed to run manual sync
+    internal_api_key: str = ""  # when set, require X-PS-Price-Internal header
 
     @property
     def admin_email_list(self) -> set[str]:
@@ -142,6 +143,21 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "PS_PRICE_JWT_SECRET must be set to a random string of at least 32 characters in production mode"
             )
+        if not self.internal_api_key or len(self.internal_api_key) < 32:
+            raise RuntimeError(
+                "PS_PRICE_INTERNAL_API_KEY must be set to a random string of at least 32 characters in production mode"
+            )
+        if self.internal_api_key == "ps-price-local-proxy-key":
+            raise RuntimeError(
+                "PS_PRICE_INTERNAL_API_KEY must not use the default development value in production mode"
+            )
+        if "*" in self.cors_origins:
+            raise RuntimeError("PS_PRICE_CORS_ORIGINS must not use wildcard (*) in production mode")
+        for origin in self.cors_origin_list:
+            if not origin.startswith("https://"):
+                raise RuntimeError(
+                    f"PS_PRICE_CORS_ORIGINS must list HTTPS origins only in production mode (got {origin!r})"
+                )
 
     @property
     def webauthn_origin_list(self) -> list[str]:

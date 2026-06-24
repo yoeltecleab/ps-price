@@ -62,7 +62,60 @@ def test_production_settings_validation() -> None:
         webauthn_rp_id="psprice.example.com",
         webauthn_origin="https://psprice.example.com",
         jwt_secret="production-secret-at-least-32-characters-long",
+        internal_api_key="production-internal-api-key-at-least-32-chars",
+        cors_origins="https://psprice.example.com",
     ).validate_production_settings()
+
+
+def test_internal_key_valid() -> None:
+    from backend.app.security import internal_key_valid
+
+    settings = Settings(internal_api_key="super-secret-internal-key-32chars-min")
+    assert internal_key_valid(settings, "super-secret-internal-key-32chars-min")
+    assert not internal_key_valid(settings, "wrong")
+    assert not internal_key_valid(Settings(internal_api_key=""), "anything")
+
+
+def test_healthz_scheduler_requires_internal_key() -> None:
+    from fastapi.testclient import TestClient
+
+    from backend.app.main import app
+
+    app.state.settings = Settings(
+        internal_api_key="test-internal-api-key-at-least-32-characters",
+        production_mode=False,
+    )
+
+    class _Scheduler:
+        running = False
+
+    app.state.scheduler = _Scheduler()
+    client = TestClient(app)
+    assert client.get("/healthz").status_code == 200
+    assert client.get("/healthz?scheduler=true").status_code == 403
+    ok = client.get(
+        "/healthz?scheduler=true",
+        headers={"X-PS-Price-Internal": "test-internal-api-key-at-least-32-characters"},
+    )
+    assert ok.status_code == 200
+    assert "scheduler_running" in ok.json()
+
+
+def test_production_rejects_weak_internal_api_key() -> None:
+    base = dict(
+        production_mode=True,
+        admin_emails="admin@example.com",
+        cookie_secure=True,
+        frontend_url="https://psprice.example.com",
+        webauthn_rp_id="psprice.example.com",
+        webauthn_origin="https://psprice.example.com",
+        jwt_secret="production-secret-at-least-32-characters-long",
+        cors_origins="https://psprice.example.com",
+    )
+    with pytest.raises(RuntimeError, match="INTERNAL_API_KEY"):
+        Settings(**base, internal_api_key="").validate_production_settings()
+    with pytest.raises(RuntimeError, match="INTERNAL_API_KEY"):
+        Settings(**base, internal_api_key="ps-price-local-proxy-key").validate_production_settings()
 
 
 def test_jwt_access_and_refresh_roundtrip() -> None:

@@ -734,6 +734,222 @@ class AuthRepository:
             )
             return cursor.rowcount > 0
 
+    def delete_all_passkeys(self, user_id: int) -> int:
+        """Remove every passkey for a user (e.g. switching to password-only sign-in)."""
+        with self.db._lock, self.db.connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM passkey_credentials WHERE user_id = ?",
+                (user_id,),
+            )
+            return cursor.rowcount
+
+    def delete_user(self, user_id: int) -> bool:
+        """Permanently delete a user account and cascaded auth data."""
+        with self.db._lock, self.db.connect() as conn:
+            cursor = conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            return cursor.rowcount > 0
+
+    def admin_user_stats(self) -> dict:
+        """User counts for the admin dashboard."""
+        with self.db.connect() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+            verified = conn.execute(
+                "SELECT COUNT(*) FROM users WHERE email_verified_at IS NOT NULL"
+            ).fetchone()[0]
+            with_password = conn.execute(
+                "SELECT COUNT(*) FROM users WHERE password_hash IS NOT NULL"
+            ).fetchone()[0]
+            passkeys = conn.execute(
+                "SELECT COUNT(*) FROM passkey_credentials"
+            ).fetchone()[0]
+            sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        return {
+            "total": total,
+            "verified": verified,
+            "with_password": with_password,
+            "passkeys": passkeys,
+            "active_sessions": sessions,
+        }
+
+    def list_users_admin(
+        self,
+        *,
+        q: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        where = ""
+        params: list[object] = []
+        if q and q.strip():
+            where = "WHERE u.email LIKE ? OR u.display_name LIKE ?"
+            pattern = f"%{q.strip()}%"
+            params.extend([pattern, pattern])
+        bounded = max(1, min(limit, 200))
+        with self.db.connect() as conn:
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM users u {where}",
+                params,
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"""
+                SELECT
+                    u.id, u.email, u.display_name, u.email_verified_at,
+                    u.created_at, u.updated_at,
+                    (SELECT COUNT(*) FROM user_library ul WHERE ul.user_id = u.id) AS library_count,
+                    (SELECT COUNT(*) FROM watches w WHERE w.user_id = u.id) AS watch_count,
+                    (SELECT COUNT(*) FROM passkey_credentials p WHERE p.user_id = u.id) AS passkey_count,
+                    (u.password_hash IS NOT NULL) AS has_password
+                FROM users u
+                {where}
+                ORDER BY u.created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (*params, bounded, max(0, offset)),
+            ).fetchall()
+            items = []
+            for row in rows:
+                item = dict(row)
+                item["email_verified"] = bool(item.pop("email_verified_at"))
+                item["has_password"] = bool(item["has_password"])
+                items.append(item)
+            return items, total
+
+    def list_sessions_admin(
+        self,
+        *,
+        q: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        where = ""
+        params: list[object] = []
+        if q and q.strip():
+            where = "WHERE u.email LIKE ?"
+            params.append(f"%{q.strip()}%")
+        bounded = max(1, min(limit, 200))
+        with self.db.connect() as conn:
+            total = conn.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM sessions s
+                JOIN users u ON u.id = s.user_id
+                {where}
+                """,
+                params,
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"""
+                SELECT s.id, s.user_id, s.expires_at, s.created_at, s.user_agent, s.ip_address,
+                       u.email AS user_email
+                FROM sessions s
+                JOIN users u ON u.id = s.user_id
+                {where}
+                ORDER BY s.created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (*params, bounded, max(0, offset)),
+            ).fetchall()
+            return [dict(row) for row in rows], total
+
+    def list_passkeys_admin(
+        self,
+        *,
+        q: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        where = ""
+        params: list[object] = []
+        if q and q.strip():
+            where = "WHERE u.email LIKE ? OR p.friendly_name LIKE ?"
+            pattern = f"%{q.strip()}%"
+            params.extend([pattern, pattern])
+        bounded = max(1, min(limit, 200))
+        with self.db.connect() as conn:
+            total = conn.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM passkey_credentials p
+                JOIN users u ON u.id = p.user_id
+                {where}
+                """,
+                params,
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"""
+                SELECT p.id, p.user_id, p.friendly_name, p.transports, p.sign_count,
+                       p.created_at, p.last_used_at, u.email AS user_email
+                FROM passkey_credentials p
+                JOIN users u ON u.id = p.user_id
+                {where}
+                ORDER BY p.created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (*params, bounded, max(0, offset)),
+            ).fetchall()
+            return [dict(row) for row in rows], total
+
+    def list_notification_emails_admin(
+        self,
+        *,
+        q: str | None = None,
+        verified_only: bool = False,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        where: list[str] = []
+        params: list[object] = []
+        if verified_only:
+            where.append("e.verified_at IS NOT NULL")
+        if q and q.strip():
+            where.append("(e.email LIKE ? OR u.email LIKE ?)")
+            pattern = f"%{q.strip()}%"
+            params.extend([pattern, pattern])
+        suffix = f"WHERE {' AND '.join(where)}" if where else ""
+        bounded = max(1, min(limit, 200))
+        with self.db.connect() as conn:
+            total = conn.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM user_notification_emails e
+                JOIN users u ON u.id = e.user_id
+                {suffix}
+                """,
+                params,
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"""
+                SELECT e.id, e.user_id, e.email, e.label, e.verified_at, e.is_primary,
+                       e.created_at, u.email AS user_email
+                FROM user_notification_emails e
+                JOIN users u ON u.id = e.user_id
+                {suffix}
+                ORDER BY e.created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (*params, bounded, max(0, offset)),
+            ).fetchall()
+            items = []
+            for row in rows:
+                item = dict(row)
+                item["verified"] = bool(item.pop("verified_at"))
+                item["is_primary"] = bool(item["is_primary"])
+                items.append(item)
+            return items, total
+
+    def admin_delete_passkey(self, passkey_id: int) -> bool:
+        with self.db._lock, self.db.connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM passkey_credentials WHERE id = ?",
+                (passkey_id,),
+            )
+            return cursor.rowcount > 0
+
+    def admin_revoke_user_sessions(self, user_id: int) -> int:
+        with self.db._lock, self.db.connect() as conn:
+            cursor = conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+            return cursor.rowcount
+
     # -------------------------------------------------------------------------
     # User library — which games a logged-in user has saved
     # -------------------------------------------------------------------------

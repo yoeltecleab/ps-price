@@ -76,6 +76,10 @@ class RateLimiter:
             return request.client.host
         return "unknown"
 
+    def active_bucket_count(self) -> int:
+        with self._lock:
+            return sum(1 for bucket in self._events.values() if bucket)
+
     def reset(self) -> None:
         """Clear all buckets. Used by tests so one test does not 429 the next."""
         with self._lock:

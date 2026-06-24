@@ -35,10 +35,13 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from backend.app.auth_repository import AuthRepository
 from backend.app.auth_routes import router as auth_router
+from backend.app.admin_routes import router as admin_router
 from backend.app.auth_service import AuthService
 from backend.app.config import Settings, get_settings
 from backend.app.database import Database
@@ -48,6 +51,11 @@ from backend.app.ps_store import PlayStationStoreClient
 from backend.app.repository import Repository, UNSET
 from backend.app.rate_limit import rate_limiter
 from backend.app.scheduler import PriceScheduler
+from backend.app.security import (
+    MAX_REQUEST_BODY_BYTES,
+    api_security_headers,
+    internal_key_valid,
+)
 from backend.app.schemas import (
     BulkDeleteNotifications,
     BulkTrackRequest,
@@ -144,33 +152,79 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="PS Price Backend", version="0.2.0", lifespan=lifespan)
 
 
+def _settings_for_request(request: Request) -> Settings:
+    """Prefer per-process settings on app.state (tests, lifespan) over cached env."""
+    state_settings = getattr(request.app.state, "settings", None)
+    if state_settings is not None:
+        return state_settings
+    return get_settings()
+
+
+class InternalAPIKeyMiddleware(BaseHTTPMiddleware):
+    """Reject direct API access unless the internal proxy key is presented."""
+
+    async def dispatch(self, request: Request, call_next):
+        settings = _settings_for_request(request)
+        if request.url.path == "/healthz":
+            return await call_next(request)
+        if settings.production_mode or settings.internal_api_key:
+            if not internal_key_valid(settings, request.headers.get("x-ps-price-internal")):
+                return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+        return await call_next(request)
+
+
+class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
+    """Reject oversized request bodies before handlers run."""
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method in {"POST", "PUT", "PATCH"}:
+            raw = request.headers.get("content-length")
+            if raw:
+                try:
+                    if int(raw) > MAX_REQUEST_BODY_BYTES:
+                        return JSONResponse(
+                            status_code=413,
+                            content={"detail": "request too large"},
+                        )
+                except ValueError:
+                    return JSONResponse(status_code=400, content={"detail": "invalid content-length"})
+        return await call_next(request)
+
+
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Add standard browser security headers to every HTTP response."""
 
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-        if get_settings().production_mode:
-            response.headers["Strict-Transport-Security"] = (
-                "max-age=31536000; includeSubDomains"
-            )
+        for key, value in api_security_headers(
+            production_mode=_settings_for_request(request).production_mode
+        ).items():
+            response.headers[key] = value
         return response
 
 
 app.add_middleware(SecurityHeadersMiddleware)
-# CORS lets the Next.js frontend (different port) call this API with cookies.
+app.add_middleware(RequestSizeLimitMiddleware)
+app.add_middleware(InternalAPIKeyMiddleware)
+if get_settings().production_mode:
+    from urllib.parse import urlparse
+
+    _host = urlparse(get_settings().frontend_url).hostname or "localhost"
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=["localhost", "127.0.0.1", _host, "backend"],
+    )
+# CORS is a fallback if the API is ever called cross-origin from the browser.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_origin_list,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept"],
 )
 # Mount all /api/auth/* routes from auth_routes.py
 app.include_router(auth_router)
+app.include_router(admin_router)
 
 
 # ---------------------------------------------------------------------------
@@ -196,11 +250,14 @@ def settings_dep() -> Settings:
 @app.get("/healthz")
 def healthz(
     settings: Annotated[Settings, Depends(settings_dep)],
+    request: Request,
     scheduler: bool = Query(default=False, description="Include scheduler status"),
 ):
     payload: dict[str, object] = {"status": "ok"}
     if scheduler:
-        payload["scheduler_running"] = app.state.scheduler.running
+        if not internal_key_valid(settings, request.headers.get("x-ps-price-internal")):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+        payload["scheduler_running"] = request.app.state.scheduler.running
         payload["scheduler_enabled"] = settings.scheduler_enabled
     return payload
 
@@ -213,9 +270,15 @@ def sync_status(service: Annotated[PriceService, Depends(service_dep)]):
 
 @app.post("/api/catalog/refresh")
 async def refresh_catalog_public(
+    request: Request,
     service: Annotated[PriceService, Depends(service_dep)],
 ):
     """Rate-limited full catalog refresh (shared cooldown across all users)."""
+    rate_limiter.check(
+        f"catalog-refresh:{rate_limiter.client_ip(request)}",
+        limit=10,
+        window_seconds=3600,
+    )
     try:
         return await service.refresh_catalog_public()
     except Exception as exc:
@@ -278,11 +341,13 @@ def suggest_games(
 
 @app.post("/api/sync-deals")
 async def sync_deals(
+    request: Request,
     service: Annotated[PriceService, Depends(service_dep)],
     user: AdminUserDep,
     locale: str | None = None,
     force: bool = Query(default=True),
 ):
+    rate_limiter.check(f"admin-sync:{user['id']}", limit=6, window_seconds=3600)
     try:
         return await service.sync_catalog(locale, force=force)
     except ValueError as exc:

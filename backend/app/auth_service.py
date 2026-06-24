@@ -24,6 +24,7 @@ This service owns *what should happen*; the repository owns *how rows are stored
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -388,37 +389,43 @@ class AuthService:
     # Password reset and change
     # -------------------------------------------------------------------------
 
-    async def forgot_password(self, email: str) -> bool:
-        """Email a reset link when the account exists.
-
-        Returns:
-            True when a reset email was sent, False when the address is unknown.
-        """
+    async def forgot_password(self, email: str) -> None:
+        """Queue a reset email when the account exists (no-op otherwise)."""
         normalized = self._validate_email(email)
         user = self.auth_repo.get_user_by_email(normalized)
         if not user:
-            return False
+            return
         token = self.auth_repo.create_password_reset_token(user["id"])
         link = f"{self.settings.frontend_url.rstrip('/')}/auth/reset-password?token={token}"
         theme = user.get("preferred_theme_id") or "abyss"
+        asyncio.create_task(
+            self._send_password_reset_email(normalized, user["id"], link, theme),
+            name=f"ps-price-reset-email-{user['id']}",
+        )
+
+    async def _send_password_reset_email(
+        self, email: str, user_id: int, link: str, theme: str
+    ) -> None:
         from backend.app.email_templates import system_email_html
 
-        await self.notifier.send_system_email(
-            normalized,
-            "Reset your PS Prices password",
-            f"Reset your PS Prices password (expires in 2 hours):\n\n{link}",
-            html_body=system_email_html(
+        try:
+            await self.notifier.send_system_email(
+                email,
+                "Reset your PS Prices password",
+                f"Reset your PS Prices password (expires in 2 hours):\n\n{link}",
+                html_body=system_email_html(
+                    theme_id=theme,
+                    title="Reset your password",
+                    message="We received a request to reset your password. Tap below to choose a new one.",
+                    cta_label="Reset password",
+                    cta_href=link,
+                    kind="reset",
+                ),
+                user_id=user_id,
                 theme_id=theme,
-                title="Reset your password",
-                message="We received a request to reset your password. Tap below to choose a new one.",
-                cta_label="Reset password",
-                cta_href=link,
-                kind="reset",
-            ),
-            user_id=user["id"],
-            theme_id=theme,
-        )
-        return True
+            )
+        except Exception:
+            logger.exception("Failed to send password reset email to %s", email)
 
     def reset_password(self, token: str, new_password: str) -> None:
         """Set a new password from a reset link and log out all sessions.
@@ -434,9 +441,14 @@ class AuthService:
         row = self.auth_repo.consume_password_reset_token(token)
         if not row:
             raise AuthError("reset link is invalid or expired")
-        self.auth_repo.update_user_password(row["user_id"], hash_password(new_password))
-        self.auth_repo.bump_token_version(row["user_id"])
-        self.auth_repo.delete_user_sessions(row["user_id"])
+        user_id = row["user_id"]
+        user = self.auth_repo.get_user_by_id(user_id)
+        was_passkey_only = bool(user and not user.get("password_hash"))
+        self.auth_repo.update_user_password(user_id, hash_password(new_password))
+        if was_passkey_only:
+            self.auth_repo.delete_all_passkeys(user_id)
+        self.auth_repo.bump_token_version(user_id)
+        self.auth_repo.delete_user_sessions(user_id)
 
     def change_password(self, user_id: int, current_password: str, new_password: str) -> None:
         """Change password while logged in; requires current password.
@@ -784,6 +796,11 @@ class AuthService:
         if not self.auth_repo.delete_passkey(passkey_id, user_id):
             raise AuthError("passkey not found")
 
+    def delete_account(self, user_id: int) -> None:
+        """Permanently delete the signed-in account and related auth data."""
+        if not self.auth_repo.delete_user(user_id):
+            raise AuthError("user not found")
+
     def _credential_descriptors(self, user_id: int) -> list[PublicKeyCredentialDescriptor]:
         """Build WebAuthn allow-list entries from stored credential ids."""
         with self.auth_repo.db.connect() as conn:
@@ -849,31 +866,40 @@ class AuthService:
 
     async def _send_account_verification(self, user: dict) -> None:
         """Create verification token and email link to ``/auth/verify``."""
-        from backend.app.email_templates import system_email_html
-
         token = self.auth_repo.create_email_verification_token(user["id"])
         link = f"{self.settings.frontend_url.rstrip('/')}/auth/verify?token={token}"
         theme = user.get("preferred_theme_id") or "abyss"
-        await self.notifier.send_system_email(
-            user["email"],
-            "Verify your PS Prices account",
-            f"Welcome to PS Prices! Tap the button in this email to verify your account and unlock price alerts.\n\n{link}",
-            html_body=system_email_html(
-                theme_id=theme,
-                title="Verify your email",
-                message="Welcome to PS Prices. Confirm your email to track games, deploy price watches, and receive alerts in your chosen theme.",
-                cta_label="Verify email",
-                cta_href=link,
-                kind="verify",
-            ),
-            user_id=user["id"],
-            theme_id=theme,
+        asyncio.create_task(
+            self._send_account_verification_email(user["email"], user["id"], link, theme),
+            name=f"ps-price-verify-email-{user['id']}",
         )
+
+    async def _send_account_verification_email(
+        self, email: str, user_id: int, link: str, theme: str
+    ) -> None:
+        from backend.app.email_templates import system_email_html
+
+        try:
+            await self.notifier.send_system_email(
+                email,
+                "Verify your PS Prices account",
+                f"Welcome to PS Prices! Tap the button in this email to verify your account and unlock price alerts.\n\n{link}",
+                html_body=system_email_html(
+                    theme_id=theme,
+                    title="Verify your email",
+                    message="Welcome to PS Prices. Confirm your email to track games, deploy price watches, and receive alerts in your chosen theme.",
+                    cta_label="Verify email",
+                    cta_href=link,
+                    kind="verify",
+                ),
+                user_id=user_id,
+                theme_id=theme,
+            )
+        except Exception:
+            logger.exception("Failed to send verification email to %s", email)
 
     async def _send_notification_email_verification(self, user_id: int, row: dict) -> None:
         """Create per-address token and email link to notification verify page."""
-        from backend.app.email_templates import system_email_html
-
         user = self.auth_repo.get_user_by_id(user_id)
         theme = (user or {}).get("preferred_theme_id") or "abyss"
         token = self.auth_repo.create_notification_email_verification_token(row["id"])
@@ -881,20 +907,36 @@ class AuthService:
             f"{self.settings.frontend_url.rstrip('/')}/account/emails/verify"
             f"?id={row['id']}&token={token}"
         )
-        await self.notifier.send_system_email(
-            row["email"],
-            "Confirm your PS Prices alert email",
-            f"Confirm this address for price alerts:\n\n{link}",
-            html_body=system_email_html(
-                theme_id=theme,
-                title="Confirm alert email",
-                message="Add this address to your PS Prices account to receive price-drop notifications.",
-                cta_label="Verify email",
-                cta_href=link,
+        asyncio.create_task(
+            self._send_notification_email_verification_message(
+                row["email"], user_id, link, theme
             ),
-            user_id=user_id,
-            theme_id=theme,
+            name=f"ps-price-notify-verify-{row['id']}",
         )
+
+    async def _send_notification_email_verification_message(
+        self, email: str, user_id: int, link: str, theme: str
+    ) -> None:
+        from backend.app.email_templates import system_email_html
+
+        try:
+            await self.notifier.send_system_email(
+                email,
+                "Confirm your PS Prices alert email",
+                f"Confirm this address for price alerts:\n\n{link}",
+                html_body=system_email_html(
+                    theme_id=theme,
+                    title="Confirm alert email",
+                    message="Add this address to your PS Prices account to receive price-drop notifications.",
+                    cta_label="Verify email",
+                    cta_href=link,
+                    kind="verify",
+                ),
+                user_id=user_id,
+                theme_id=theme,
+            )
+        except Exception:
+            logger.exception("Failed to send notification email verification to %s", email)
 
     def require_verified_notification_email(
         self, user_id: int, notification_email_id: int | None, fallback_email: str | None

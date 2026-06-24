@@ -20,10 +20,10 @@ def _layout(
     cta_block = ""
     if cta_label and cta_href:
         cta_block = f"""
-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:40px;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:34px;">
                 <tr>
-                  <td align="center" style="padding:8px 0 32px;">
-                    <a href="{cta_href}" style="display:inline-block;min-width:220px;padding:18px 36px;background:{p['primary']};color:#ffffff;text-decoration:none;border-radius:999px;font-size:16px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;">
+                  <td align="center" style="padding:6px 0 26px;">
+                    <a href="{cta_href}" style="display:inline-block;min-width:220px;padding:15px 30px;background:{p['primary']};color:#ffffff;text-decoration:none;border-radius:999px;font-size:16px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;">
                       {cta_label}
                     </a>
                   </td>
@@ -41,7 +41,7 @@ def _layout(
   <title>{title}</title>
 </head>
 <body style="margin:0;padding:0;background:{p['bg']};font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:{p['ink']};">
-  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:{p['bg']};padding:56px 20px 72px;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:{p['bg']};padding:48px 20px 60px;">
     <tr>
       <td align="center">
         <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:520px;background:{p['surface']};border:1px solid {p['border']};border-radius:28px;overflow:hidden;box-shadow:0 32px 80px rgba(0,0,0,0.42);">
@@ -49,10 +49,10 @@ def _layout(
             <td style="height:6px;background:linear-gradient(90deg,{p['accent']} 0%,{p['primary']} 55%,{p['accent']} 100%);font-size:0;line-height:0;">&nbsp;</td>
           </tr>
           <tr>
-            <td style="padding:52px 44px 40px;text-align:center;background:linear-gradient(180deg,{p['surface']} 0%,{p['bg']} 100%);">
+            <td style="padding:44px 40px 34px;text-align:center;background:linear-gradient(180deg,{p['surface']} 0%,{p['bg']} 100%);">
               <p style="margin:0;font-size:12px;letter-spacing:0.42em;text-transform:uppercase;color:{p['accent']};font-weight:700;">{eyebrow}</p>
-              <h1 style="margin:28px 0 0;font-size:34px;line-height:1.2;font-weight:800;color:{p['ink']};">{title}</h1>
-              <p style="margin:24px 0 0;font-size:18px;line-height:1.75;color:{p['muted']};max-width:380px;margin-left:auto;margin-right:auto;">{subtitle}</p>
+              <h1 style="margin:24px 0 0;font-size:32px;line-height:1.2;font-weight:800;color:{p['ink']};">{title}</h1>
+              <p style="margin:20px 0 0;font-size:17px;line-height:1.7;color:{p['muted']};max-width:380px;margin-left:auto;margin-right:auto;">{subtitle}</p>
             </td>
           </tr>
           <tr>
@@ -65,13 +65,13 @@ def _layout(
             </td>
           </tr>
           <tr>
-            <td style="padding:36px 44px 48px;">
+            <td style="padding:30px 40px 40px;">
               {body_html}
               {cta_block}
             </td>
           </tr>
           <tr>
-            <td style="padding:0 44px 40px;text-align:center;">
+            <td style="padding:0 40px 34px;text-align:center;">
               <p style="margin:0;font-size:13px;line-height:1.8;color:{p['muted']};">
                 PS Prices · PlayStation Store price intelligence
               </p>
@@ -167,17 +167,17 @@ def system_email_html(
     }.get(kind, "This secure link expires soon.")
 
     body = f"""
-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-bottom:28px;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-bottom:22px;">
                 <tr>
-                  <td align="center" style="padding:12px 0 28px;">
-                    <div style="width:72px;height:72px;border-radius:20px;border:1px solid {p['border']};background:linear-gradient(180deg,{p['surface']} 0%,{p['bg']} 100%);line-height:72px;font-size:30px;text-align:center;color:{p['accent']};">◎</div>
+                  <td align="center" style="padding:8px 0 20px;">
+                    <div style="width:60px;height:60px;border-radius:18px;border:1px solid {p['border']};background:linear-gradient(180deg,{p['surface']} 0%,{p['bg']} 100%);line-height:60px;font-size:26px;text-align:center;color:{p['accent']};">◎</div>
                   </td>
                 </tr>
               </table>
               <p style="margin:0;font-size:19px;line-height:1.85;color:{p['ink']};text-align:center;">{message}</p>
-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:32px;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:26px;">
                 <tr>
-                  <td style="padding:22px 24px;border:1px solid {p['border']};border-radius:18px;background:{p['bg']};">
+                  <td style="padding:18px 20px;border:1px solid {p['border']};border-radius:16px;background:{p['bg']};">
                     <p style="margin:0;font-size:14px;line-height:1.75;color:{p['muted']};text-align:center;">{detail}</p>
                   </td>
                 </tr>

@@ -1,0 +1,29 @@
+---
+description: Mandatory security rules for every change in PS Price
+alwaysApply: true
+---
+
+# Security — mandatory for all agents
+
+Read `docs/SECURITY.md` before auth, API, deployment, or infra work.
+
+## Non-negotiables
+
+- **Never** expose the FastAPI backend on a public port. Traffic goes Frontend → `/api/*` proxy → backend with `X-PS-Price-Internal`.
+- **Never** commit secrets (`.env`, keys, SMTP passwords, JWT secrets).
+- **Never** weaken production checks in `config.validate_production_settings()`.
+- **Never** add `allow_origins=["*"]`, open CORS headers, or disable the internal API key in production.
+- **Never** return stack traces or raw exceptions to clients when `PS_PRICE_PRODUCTION_MODE=true`.
+- **Never** store passwords or tokens in plain text; use existing hashing/JWT patterns.
+- **Always** use parameterized SQL in `repository.py` / `auth_repository.py` — no f-string SQL with user input.
+- **Always** rate-limit sensitive endpoints (auth, admin, catalog refresh) using `rate_limiter`.
+- **Always** validate redirect URLs with `safe_redirect_path()` — no open redirects.
+- **Always** keep auth cookies `HttpOnly`; `Secure` when `PS_PRICE_COOKIE_SECURE=true`.
+
+## Before merging security-sensitive code
+
+1. Run `pytest backend/tests/test_security.py`.
+2. Confirm admin routes use `AdminUserDep`.
+3. Confirm new routes are not reachable without auth unless intentionally public.
+
+No system is "unhackable." Aim for defense in depth and fail-closed defaults.

@@ -249,11 +249,20 @@ cp .env.example .env
 nano .env
 ```
 
-**Production values** (adjust for your Elastic IP or domain):
+**Production values** (adjust for your Elastic IP or domain). See also §21 for the full security checklist.
 
 ```env
 PS_PRICE_DATABASE_PATH=/data/ps_price.sqlite3
 PS_PRICE_STORE_LOCALE=en-us
+
+PS_PRICE_PRODUCTION_MODE=true
+PS_PRICE_COOKIE_SECURE=true
+PS_PRICE_FRONTEND_URL=https://psprice.yourdomain.com
+PS_PRICE_WEBAUTHN_RP_ID=psprice.yourdomain.com
+PS_PRICE_WEBAUTHN_ORIGIN=https://psprice.yourdomain.com
+PS_PRICE_ADMIN_EMAILS=you@yourdomain.com
+PS_PRICE_JWT_SECRET=replace-with-openssl-rand-base64-48
+PS_PRICE_INTERNAL_API_KEY=replace-with-openssl-rand-base64-48
 
 PS_PRICE_SCHEDULER_ENABLED=true
 PS_PRICE_CHECK_INTERVAL_MINUTES=360
@@ -263,10 +272,9 @@ PS_PRICE_CACHE_TTL_SECONDS=1800
 PS_PRICE_REQUEST_MIN_INTERVAL_SECONDS=3
 
 # Must match your public URL exactly (scheme + host, no trailing slash)
-# HTTP only (no domain):
-PS_PRICE_CORS_ORIGINS=http://54.123.45.67
-# OR with HTTPS domain:
-# PS_PRICE_CORS_ORIGINS=https://psprice.yourdomain.com
+PS_PRICE_CORS_ORIGINS=https://psprice.yourdomain.com
+# HTTP only (no domain yet):
+# PS_PRICE_CORS_ORIGINS=http://54.123.45.67
 
 # Optional — AWS SES (see Step 18)
 # PS_PRICE_SMTP_HOST=email-smtp.us-east-1.amazonaws.com
@@ -486,7 +494,7 @@ docker cp ps-price-backend:/data/backup.sqlite3 ~/ps-price-backup-$(date +%Y%m%d
 
 ### Application (required for production)
 
-Set these in `.env` on the server:
+See **[docs/SECURITY.md](SECURITY.md)** for the full threat model. Set these in `.env` on the server:
 
 ```env
 PS_PRICE_PRODUCTION_MODE=true
@@ -495,16 +503,18 @@ PS_PRICE_FRONTEND_URL=https://your-domain.com
 PS_PRICE_WEBAUTHN_RP_ID=your-domain.com
 PS_PRICE_WEBAUTHN_ORIGIN=https://your-domain.com
 PS_PRICE_ADMIN_EMAILS=you@your-domain.com
-PS_PRICE_JWT_SECRET=replace-with-openssl-rand-hex-32-or-longer-random-string
+PS_PRICE_JWT_SECRET=replace-with-openssl-rand-base64-48-or-longer
+PS_PRICE_INTERNAL_API_KEY=replace-with-openssl-rand-base64-48-or-longer
 PS_PRICE_JWT_ACCESS_TTL_MINUTES=30
 PS_PRICE_JWT_REFRESH_TTL_DAYS=30
 PS_PRICE_REQUIRE_EMAIL_VERIFICATION=true
 PS_PRICE_CORS_ORIGINS=https://your-domain.com
 ```
 
-- [ ] `PS_PRICE_PRODUCTION_MODE=true` — enforces secure cookies, HTTPS frontend URL, WebAuthn RP ID, and at least one admin email at startup
+- [ ] `PS_PRICE_PRODUCTION_MODE=true` — enforces secure cookies, HTTPS frontend URL, WebAuthn RP ID, admin email, JWT secret, internal API key, and HTTPS-only CORS at startup
 - [ ] `PS_PRICE_COOKIE_SECURE=true` — JWT cookies only sent over HTTPS
-- [ ] `PS_PRICE_JWT_SECRET` — random string ≥32 chars (`openssl rand -hex 32`)
+- [ ] `PS_PRICE_JWT_SECRET` — random string ≥32 chars (`openssl rand -base64 48`)
+- [ ] `PS_PRICE_INTERNAL_API_KEY` — same value as `INTERNAL_API_KEY` on the frontend container; ≥32 chars, not the dev default
 - [ ] `PS_PRICE_ADMIN_EMAILS` — comma-separated verified account emails allowed to run manual catalog sync (`POST /api/sync-deals`) and scheduler refresh
 - [ ] `PS_PRICE_WEBAUTHN_RP_ID` matches your public hostname (no port, no scheme)
 - [ ] `PS_PRICE_WEBAUTHN_ORIGIN` matches the browser origin users sign in from

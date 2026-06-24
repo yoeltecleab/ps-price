@@ -1,3 +1,7 @@
+# PS Price — agent instructions
+
+**All AI agents must read [`AGENTS.md`](../AGENTS.md) at the repo root** (security rules, backend guide, architecture).
+
 <!-- BEGIN:nextjs-agent-rules -->
 # This is NOT the Next.js you know
 

@@ -1,0 +1,22 @@
+---
+description: Backend work must follow the project backend guide
+globs: backend/**/*
+alwaysApply: false
+---
+
+# Backend development
+
+Before changing Python backend code, read **`backend/docs/BACKEND_GUIDE.md`** (architecture, request flow, modules, conventions).
+
+Also consult:
+
+- `backend/docs/API.md` — endpoint contracts
+- `docs/SECURITY.md` — security requirements
+- `docs/DEPLOYMENT-AWS.md` — production layout
+
+## Conventions
+
+- Business logic in `service.py` / `auth_service.py`, not in route handlers.
+- SQL only in `repository.py` / `auth_repository.py`.
+- New env vars: `PS_PRICE_*` prefix, document in `.env.example`.
+- Admin features: `admin_routes.py` + `AdminUserDep`, not public endpoints.

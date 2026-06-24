@@ -72,6 +72,28 @@ export function buildLoginOptions(options: Record<string, unknown>): CredentialR
   };
 }
 
+export function suggestPasskeyName(credential: PublicKeyCredential): string {
+  const ua = navigator.userAgent;
+  if (credential.authenticatorAttachment === "cross-platform") {
+    return "Security key";
+  }
+  if (/iPhone|iPad|iPod/.test(ua)) return "iCloud Keychain";
+  if (/Mac/.test(ua)) return "Touch ID · iCloud Keychain";
+  if (/Windows/.test(ua)) return "Windows Hello";
+  if (/Android/.test(ua)) return "Google Password Manager";
+  return "This device";
+}
+
+export function isPasskeyUserCancelled(error: unknown): boolean {
+  if (error instanceof DOMException) {
+    return error.name === "NotAllowedError" || error.name === "AbortError";
+  }
+  if (error instanceof Error) {
+    return /cancel/i.test(error.message) || /not allowed/i.test(error.message);
+  }
+  return false;
+}
+
 export function credentialToJson(credential: PublicKeyCredential) {
   if (credential.response instanceof AuthenticatorAttestationResponse) {
     const response = credential.response;

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowsClockwise, Lightning } from "@phosphor-icons/react";
 import { motion } from "motion/react";
@@ -92,24 +93,30 @@ export default function DealsHomePage() {
 
   useEffect(() => {
     void pollSyncStatus().then((status) => {
-      if (status) {
-        const bootstrapping = status.catalog_total === 0 && !status.last_sync;
-        setSyncing(bootstrapping);
-        if (bootstrapping) void loadDeals();
-      }
+      if (!status) return;
+      const bootstrapping = status.catalog_total === 0 && !status.last_sync;
+      setSyncing(bootstrapping || Boolean(status.syncing));
+      if (bootstrapping) void loadDeals();
     });
+
     pollRef.current = setInterval(() => {
       void pollSyncStatus().then((status) => {
         if (!status) return;
         const bootstrapping = status.catalog_total === 0 && !status.last_sync;
-        setSyncing(bootstrapping);
+        const active = bootstrapping || Boolean(status.syncing);
+        setSyncing(active);
         if (bootstrapping) void loadDeals();
+        if (!active && pollRef.current) {
+          clearInterval(pollRef.current);
+          pollRef.current = null;
+        }
       });
-    }, 5000);
+    }, 10000);
+
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [pollSyncStatus]);
+  }, [pollSyncStatus, loadDeals]);
 
   useEffect(() => {
     setSelected(new Set());
@@ -130,23 +137,6 @@ export default function DealsHomePage() {
       await loadDeals();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Refresh failed");
-    } finally {
-      setSyncing(false);
-    }
-  }
-
-  async function handleAdminSync() {
-    if (!user?.is_admin) return;
-    setSyncing(true);
-    setRefreshNotice(null);
-    try {
-      await api("/api/sync-deals", { method: "POST" });
-      setPage(0);
-      await pollSyncStatus();
-      await loadDeals();
-      setRefreshNotice("Admin catalog sync completed.");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Sync failed");
     } finally {
       setSyncing(false);
     }
@@ -329,9 +319,12 @@ export default function DealsHomePage() {
             {syncing ? "Refreshing prices…" : "Refresh prices"}
           </Button>
           {user?.is_admin ? (
-            <Button onClick={handleAdminSync} loading={syncing} size="lg" variant="ghost">
-              Admin force sync
-            </Button>
+            <Link
+              href="/admin"
+              className="inline-flex h-12 items-center gap-2.5 rounded-[var(--radius-md)] px-7 text-sm font-medium bg-transparent text-muted hover:text-accent border border-transparent hover:bg-surface/50"
+            >
+              Admin dashboard
+            </Link>
           ) : null}
           {refreshNotice ? (
             <span className="font-data text-xs text-accent">{refreshNotice}</span>
@@ -406,9 +399,12 @@ export default function DealsHomePage() {
               : "No games match your filters. Widen your search or adjust filters."}
           </p>
           {user?.is_admin && !syncing ? (
-            <Button className="mt-8" size="lg" onClick={handleAdminSync} loading={syncing}>
-              Admin force sync
-            </Button>
+            <Link
+              href="/admin"
+              className="mt-8 inline-flex h-12 items-center gap-2.5 rounded-[var(--radius-md)] px-7 text-sm font-semibold btn-neon"
+            >
+              Open admin dashboard
+            </Link>
           ) : null}
         </div>
       ) : (

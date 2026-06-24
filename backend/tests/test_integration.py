@@ -47,6 +47,7 @@ def settings(temp_db):
         require_email_verification=False,
         admin_emails="tester@example.com",
         jwt_secret="test-jwt-secret-must-be-at-least-32-chars",
+        internal_api_key="",
     )
 
 
@@ -101,12 +102,9 @@ def test_healthz(client):
 
 
 def test_healthz_with_scheduler_status(client):
-    """Test health endpoint with scheduler status query."""
+    """Scheduler details are hidden without the internal API key."""
     response = client.get("/healthz?scheduler=true")
-    assert response.status_code == 200
-    data = response.json()
-    assert "scheduler_running" in data
-    assert "scheduler_enabled" in data
+    assert response.status_code == 403
 
 
 def test_search_games_requires_query(client):

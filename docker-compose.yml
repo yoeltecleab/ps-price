@@ -9,12 +9,13 @@ services:
         required: false
     environment:
       PS_PRICE_DATABASE_PATH: /data/ps_price.sqlite3
-      PS_PRICE_CORS_ORIGINS: "http://localhost:3000,http://127.0.0.1:3000"
-      PS_PRICE_FEED_SYNC_INTERVAL_MINUTES: "60"
-      PS_PRICE_SCHEDULER_ENABLED: "true"
+      PS_PRICE_CORS_ORIGINS: ${PS_PRICE_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      PS_PRICE_FEED_SYNC_INTERVAL_MINUTES: ${PS_PRICE_FEED_SYNC_INTERVAL_MINUTES:-60}
+      PS_PRICE_SCHEDULER_ENABLED: ${PS_PRICE_SCHEDULER_ENABLED:-true}
+      PS_PRICE_INTERNAL_API_KEY: ${PS_PRICE_INTERNAL_API_KEY:-ps-price-local-proxy-key}
       PYTHONUNBUFFERED: "1"
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     volumes:
       - ps-price-data:/data
     restart: unless-stopped
@@ -27,7 +28,7 @@ services:
     networks:
       - ps-price-network
     labels:
-      - "com.example.ps-price=backend"
+      - "com.alphixy.ps-price=backend"
 
   frontend:
     build:
@@ -38,6 +39,7 @@ services:
       - "3000:3000"
     environment:
       INTERNAL_API_URL: http://backend:8000
+      INTERNAL_API_KEY: ${PS_PRICE_INTERNAL_API_KEY:-ps-price-local-proxy-key}
     depends_on:
       backend:
         condition: service_healthy
@@ -45,7 +47,7 @@ services:
     networks:
       - ps-price-network
     labels:
-      - "com.example.ps-price=frontend"
+      - "com.alphixy.ps-price=frontend"
 
 volumes:
   ps-price-data:

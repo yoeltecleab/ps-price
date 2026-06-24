@@ -9,6 +9,8 @@ import { useAuth } from "@/lib/auth";
 import {
   buildRegistrationOptions,
   credentialToJson,
+  isPasskeyUserCancelled,
+  suggestPasskeyName,
 } from "@/lib/webauthn";
 import { Button } from "@/components/Button";
 import { Input } from "@/components/Input";
@@ -63,18 +65,20 @@ export default function RegisterPage() {
       const credential = (await navigator.credentials.create(
         buildRegistrationOptions(options),
       )) as PublicKeyCredential | null;
-      if (!credential) throw new Error("Passkey setup cancelled");
+      if (!credential) return;
       await api("/api/auth/register/passkey/verify", {
         method: "POST",
         body: JSON.stringify({
           credential: credentialToJson(credential),
-          friendly_name: "Passkey",
+          friendly_name: suggestPasskeyName(credential),
         }),
       });
       await refresh();
       router.push(next);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Passkey sign-up failed");
+      if (!isPasskeyUserCancelled(err)) {
+        setError(err instanceof Error ? err.message : "Passkey sign-up failed");
+      }
     } finally {
       setLoading(false);
     }

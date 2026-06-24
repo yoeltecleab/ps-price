@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 
 from backend.app.rate_limit import rate_limiter
@@ -384,14 +384,14 @@ async def resend_verification(user: CurrentUserDep, request: Request, auth: Auth
 
 @router.post("/forgot-password")
 async def forgot_password(body: ForgotPasswordBody, request: Request, auth: AuthServiceDep):
-    """Request reset email. Returns whether an account matched the address."""
+    """Request reset email. Always returns success to avoid account enumeration."""
     rate_limiter.check(
         f"forgot:{body.email.strip().lower()}",
         limit=3,
         window_seconds=3600,
     )
-    sent = await auth.forgot_password(body.email)
-    return {"sent": sent}
+    await auth.forgot_password(body.email)
+    return {"sent": True}
 
 
 @router.post("/reset-password")
@@ -480,10 +480,10 @@ async def verify_notification_email(
 
 @router.post("/notification-emails/verify-public")
 async def verify_notification_email_public(
-    email_id: int,
     body: NotificationEmailVerify,
     request: Request,
     auth: AuthServiceDep,
+    email_id: Annotated[int, Query(alias="id")],
 ):
     """Verify from email link without login (query param ``id`` + token in body)."""
     rate_limiter.check(
@@ -613,4 +613,20 @@ def delete_passkey(passkey_id: int, user: CurrentUserDep, auth: AuthServiceDep):
         auth.delete_passkey(user["id"], passkey_id)
     except AuthError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return None
+
+
+@router.delete("/account", status_code=status.HTTP_204_NO_CONTENT)
+def delete_account(
+    user: CurrentUserDep,
+    auth: AuthServiceDep,
+    response: Response,
+    settings: SettingsDep,
+):
+    """Permanently delete the signed-in account."""
+    try:
+        auth.delete_account(user["id"])
+    except AuthError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _clear_auth_cookies(response, settings)
     return None

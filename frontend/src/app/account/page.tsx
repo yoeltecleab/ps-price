@@ -7,6 +7,8 @@ import { useAuth } from "@/lib/auth";
 import {
   buildRegistrationOptions,
   credentialToJson,
+  isPasskeyUserCancelled,
+  suggestPasskeyName,
 } from "@/lib/webauthn";
 import { Button } from "@/components/Button";
 import { Input } from "@/components/Input";
@@ -118,6 +120,45 @@ export default function AccountPage() {
     }
   }
 
+  async function resendPrimaryVerification() {
+    setLoading(true);
+    setMessage(null);
+    try {
+      await api("/api/auth/resend-verification", { method: "POST" });
+      setMessage("Verification email sent.");
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Could not resend verification email");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function resendNotificationEmail(id: number) {
+    setLoading(true);
+    setMessage(null);
+    try {
+      await api(`/api/auth/notification-emails/${id}/resend`, { method: "POST" });
+      setMessage("Verification email sent.");
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Could not resend verification email");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function deleteAccount() {
+    if (!window.confirm("Delete your account permanently? This cannot be undone.")) return;
+    setLoading(true);
+    setMessage(null);
+    try {
+      await api("/api/auth/account", { method: "DELETE" });
+      await signOut();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Account deletion failed");
+      setLoading(false);
+    }
+  }
+
   async function addPasskey() {
     setLoading(true);
     setMessage(null);
@@ -132,14 +173,16 @@ export default function AccountPage() {
       await api("/api/auth/passkey/register/verify", {
         method: "POST",
         body: JSON.stringify({
-          friendly_name: "Passkey",
+          friendly_name: suggestPasskeyName(credential),
           credential: credentialToJson(credential),
         }),
       });
       setMessage("Passkey registered.");
       await refresh();
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Passkey registration failed");
+      if (!isPasskeyUserCancelled(err)) {
+        setMessage(err instanceof Error ? err.message : "Passkey registration failed");
+      }
     } finally {
       setLoading(false);
     }
@@ -153,13 +196,18 @@ export default function AccountPage() {
         <p className="text-xs text-muted">
           {user.email_verified ? "Email verified" : "Email not verified — check your inbox"}
         </p>
-        <div className="pt-4 flex gap-2">
+        <div className="pt-4 flex flex-wrap gap-2">
           {!user.email_verified ? (
-            <Link href="/auth/verify">
-              <Button variant="secondary" size="sm">
-                Verify email
+            <>
+              <Link href="/auth/verify">
+                <Button variant="secondary" size="sm">
+                  Verify email
+                </Button>
+              </Link>
+              <Button variant="secondary" size="sm" onClick={resendPrimaryVerification} loading={loading}>
+                Resend verification
               </Button>
-            </Link>
+            </>
           ) : null}
           <Button variant="secondary" size="sm" onClick={() => signOut()}>
             Sign out
@@ -189,6 +237,11 @@ export default function AccountPage() {
                   <span className="text-[11px] font-data uppercase tracking-widest text-accent px-2 py-0.5 rounded-full border border-accent/30">
                     Primary
                   </span>
+                ) : null}
+                {!row.verified ? (
+                  <Button size="sm" variant="secondary" onClick={() => resendNotificationEmail(row.id)} loading={loading}>
+                    Resend
+                  </Button>
                 ) : null}
                 {row.verified && !row.is_primary ? (
                   <Button size="sm" variant="secondary" onClick={() => setPrimary(row.id)}>
@@ -294,6 +347,16 @@ export default function AccountPage() {
         )}
         <Button onClick={addPasskey} loading={loading} variant="secondary">
           Register passkey
+        </Button>
+      </section>
+
+      <section className="holo-panel rounded-[var(--radius-xl)] p-6 space-y-4 border border-error/30">
+        <h2 className="font-data text-xs uppercase tracking-widest text-error">Danger zone</h2>
+        <p className="text-sm text-muted">
+          Permanently delete your account, library, watches, and passkeys.
+        </p>
+        <Button variant="secondary" onClick={deleteAccount} loading={loading}>
+          Delete account
         </Button>
       </section>
 

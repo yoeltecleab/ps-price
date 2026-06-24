@@ -6,7 +6,7 @@ export function StatusPill() {
   const [status, setStatus] = useState<"loading" | "ok" | "error">("loading");
 
   useEffect(() => {
-    fetch("/healthz?scheduler=true")
+    fetch("/healthz")
       .then((r) => (r.ok ? r.json() : Promise.reject()))
       .then(() => setStatus("ok"))
       .catch(() => setStatus("error"));

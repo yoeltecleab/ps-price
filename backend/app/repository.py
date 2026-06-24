@@ -741,6 +741,261 @@ class Repository:
         with self.db.connect() as conn:
             return conn.execute("SELECT COUNT(*) FROM games").fetchone()[0]
 
+    def admin_stats(self) -> dict:
+        """Aggregate counts for the admin dashboard."""
+        with self.db.connect() as conn:
+            catalog_total = conn.execute("SELECT COUNT(*) FROM games").fetchone()[0]
+            on_sale = conn.execute(
+                "SELECT COUNT(*) FROM games WHERE discount_percent > 0"
+            ).fetchone()[0]
+            tracked = conn.execute(
+                "SELECT COUNT(*) FROM games WHERE is_tracked = 1"
+            ).fetchone()[0]
+            library_entries = conn.execute(
+                "SELECT COUNT(*) FROM user_library"
+            ).fetchone()[0]
+            watches_total = conn.execute("SELECT COUNT(*) FROM watches").fetchone()[0]
+            watches_enabled = conn.execute(
+                "SELECT COUNT(*) FROM watches WHERE enabled = 1"
+            ).fetchone()[0]
+            rows = conn.execute(
+                """
+                SELECT status, COUNT(*) AS count
+                FROM notifications
+                GROUP BY status
+                """
+            ).fetchall()
+            notification_counts = {row["status"]: row["count"] for row in rows}
+        return {
+            "catalog_total": catalog_total,
+            "on_sale": on_sale,
+            "tracked": tracked,
+            "library_entries": library_entries,
+            "watches_total": watches_total,
+            "watches_enabled": watches_enabled,
+            "notification_counts": notification_counts,
+        }
+
+    def list_watches_admin(
+        self,
+        *,
+        q: str | None = None,
+        enabled_only: bool = False,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        where: list[str] = []
+        params: list[object] = []
+        if enabled_only:
+            where.append("w.enabled = 1")
+        if q and q.strip():
+            pattern = f"%{q.strip()}%"
+            where.append(
+                "(g.name LIKE ? OR w.email LIKE ? OR u.email LIKE ?)"
+            )
+            params.extend([pattern, pattern, pattern])
+        suffix = f"WHERE {' AND '.join(where)}" if where else ""
+        bounded = max(1, min(limit, 200))
+        with self.db.connect() as conn:
+            total = conn.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM watches w
+                JOIN games g ON g.id = w.game_id
+                LEFT JOIN users u ON u.id = w.user_id
+                {suffix}
+                """,
+                params,
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"""
+                SELECT w.*, g.name AS game_name, g.current_price_cents,
+                       g.current_price_formatted, g.store_url, u.email AS user_email
+                FROM watches w
+                JOIN games g ON g.id = w.game_id
+                LEFT JOIN users u ON u.id = w.user_id
+                {suffix}
+                ORDER BY w.created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (*params, bounded, max(0, offset)),
+            ).fetchall()
+            return [dict(row) for row in rows], total
+
+    def list_notifications_admin(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        where: list[str] = []
+        params: list[object] = []
+        if status:
+            where.append("n.status = ?")
+            params.append(status)
+        suffix = f"WHERE {' AND '.join(where)}" if where else ""
+        bounded = max(1, min(limit, 500))
+        with self.db.connect() as conn:
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM notifications n {suffix}",
+                params,
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"""
+                SELECT n.*, g.name AS game_name, u.email AS user_email
+                FROM notifications n
+                LEFT JOIN games g ON g.id = n.game_id
+                LEFT JOIN users u ON u.id = n.user_id
+                {suffix}
+                ORDER BY n.created_at DESC, n.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (*params, bounded, max(0, offset)),
+            ).fetchall()
+            return [dict(row) for row in rows], total
+
+    def list_games_admin(
+        self,
+        *,
+        q: str | None = None,
+        on_sale_only: bool = False,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        return self.list_deals(
+            q=q,
+            on_sale_only=on_sale_only,
+            sort="name",
+            sort_dir="asc",
+            limit=limit,
+            offset=offset,
+        )
+
+    def list_library_admin(
+        self,
+        *,
+        q: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        where: list[str] = []
+        params: list[object] = []
+        if q and q.strip():
+            pattern = f"%{q.strip()}%"
+            where.append("(g.name LIKE ? OR u.email LIKE ?)")
+            params.extend([pattern, pattern])
+        suffix = f"WHERE {' AND '.join(where)}" if where else ""
+        bounded = max(1, min(limit, 200))
+        with self.db.connect() as conn:
+            total = conn.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM user_library ul
+                JOIN games g ON g.id = ul.game_id
+                JOIN users u ON u.id = ul.user_id
+                {suffix}
+                """,
+                params,
+            ).fetchone()[0]
+            rows = conn.execute(
+                f"""
+                SELECT ul.user_id, ul.game_id, ul.created_at,
+                       g.name AS game_name, g.current_price_formatted, g.discount_percent,
+                       u.email AS user_email
+                FROM user_library ul
+                JOIN games g ON g.id = ul.game_id
+                JOIN users u ON u.id = ul.user_id
+                {suffix}
+                ORDER BY ul.created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (*params, bounded, max(0, offset)),
+            ).fetchall()
+            return [dict(row) for row in rows], total
+
+    def admin_insights(self) -> dict:
+        """Extended analytics for the admin command center."""
+        with self.db.connect() as conn:
+            recent_users = conn.execute(
+                """
+                SELECT id, email, display_name, email_verified_at, created_at
+                FROM users
+                ORDER BY created_at DESC
+                LIMIT 8
+                """
+            ).fetchall()
+            top_watched = conn.execute(
+                """
+                SELECT g.id, g.name, g.current_price_formatted, COUNT(w.id) AS watch_count
+                FROM watches w
+                JOIN games g ON g.id = w.game_id
+                WHERE w.enabled = 1
+                GROUP BY g.id
+                ORDER BY watch_count DESC, g.name COLLATE NOCASE
+                LIMIT 10
+                """
+            ).fetchall()
+            recent_watches = conn.execute(
+                """
+                SELECT w.id, w.created_at, g.name AS game_name, u.email AS user_email
+                FROM watches w
+                JOIN games g ON g.id = w.game_id
+                LEFT JOIN users u ON u.id = w.user_id
+                ORDER BY w.created_at DESC
+                LIMIT 8
+                """
+            ).fetchall()
+            recent_emails = conn.execute(
+                """
+                SELECT n.id, n.email, n.subject, n.status, n.created_at, g.name AS game_name
+                FROM notifications n
+                LEFT JOIN games g ON g.id = n.game_id
+                ORDER BY n.created_at DESC
+                LIMIT 8
+                """
+            ).fetchall()
+            price_history_rows = conn.execute(
+                "SELECT COUNT(*) FROM price_history"
+            ).fetchone()[0]
+            unverified_users = conn.execute(
+                "SELECT COUNT(*) FROM users WHERE email_verified_at IS NULL"
+            ).fetchone()[0]
+            notification_emails = conn.execute(
+                "SELECT COUNT(*) FROM user_notification_emails"
+            ).fetchone()[0]
+            avg_discount = conn.execute(
+                """
+                SELECT AVG(discount_percent) FROM games
+                WHERE discount_percent IS NOT NULL AND discount_percent > 0
+                """
+            ).fetchone()[0]
+        return {
+            "recent_users": [dict(row) for row in recent_users],
+            "top_watched_games": [dict(row) for row in top_watched],
+            "recent_watches": [dict(row) for row in recent_watches],
+            "recent_emails": [dict(row) for row in recent_emails],
+            "price_history_rows": price_history_rows,
+            "unverified_users": unverified_users,
+            "notification_emails": notification_emails,
+            "avg_discount_percent": round(avg_discount or 0, 1),
+        }
+
+    def purge_notifications(self, *, status: str | None = None, older_than_days: int | None = None) -> int:
+        where: list[str] = []
+        params: list[object] = []
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        if older_than_days is not None and older_than_days > 0:
+            cutoff = (datetime.now(UTC) - timedelta(days=older_than_days)).isoformat()
+            where.append("created_at < ?")
+            params.append(cutoff)
+        suffix = f"WHERE {' AND '.join(where)}" if where else ""
+        with self.db._lock, self.db.connect() as conn:
+            cursor = conn.execute(f"DELETE FROM notifications {suffix}", params)
+            return cursor.rowcount
+
     def get_game(self, game_id: int) -> dict | None:
         """Return a single game row by its integer id or None if missing."""
         with self.db.connect() as conn:

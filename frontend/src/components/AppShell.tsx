@@ -2,24 +2,29 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Bell, House, Pulse, Books } from "@phosphor-icons/react";
+import { Bell, House, Pulse, Books, Shield } from "@phosphor-icons/react";
 import { motion } from "motion/react";
 import { GlobalSearch } from "./GlobalSearch";
 import { Scene } from "./Scene";
 import { SettingsDrawer } from "./SettingsDrawer";
 import { AuthMenu } from "./AuthMenu";
+import { useAuth } from "@/lib/auth";
 import { KeyboardHelp } from "./KeyboardHelp";
 import Image from "next/image";
 
-const navItems = [
-  { href: "/", label: "Deals", icon: House },
-  { href: "/library", label: "Library", icon: Books },
-  { href: "/watches", label: "Alerts", icon: Bell },
-  { href: "/notifications", label: "Feed", icon: Pulse },
-];
-
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const { user } = useAuth();
+
+  const navItems = [
+    { href: "/", label: "Deals", icon: House },
+    { href: "/library", label: "Library", icon: Books },
+    { href: "/watches", label: "Alerts", icon: Bell },
+    { href: "/notifications", label: "Feed", icon: Pulse },
+    ...(user?.is_admin
+      ? [{ href: "/admin", label: "Admin", icon: Shield }]
+      : []),
+  ];
 
   return (
     <div className="relative min-h-dvh">

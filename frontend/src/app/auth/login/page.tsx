@@ -9,6 +9,7 @@ import { useAuth } from "@/lib/auth";
 import {
   buildLoginOptions,
   credentialToJson,
+  isPasskeyUserCancelled,
 } from "@/lib/webauthn";
 import { Button } from "@/components/Button";
 import { Input } from "@/components/Input";
@@ -52,7 +53,7 @@ export default function LoginPage() {
       const credential = (await navigator.credentials.get(
         buildLoginOptions(options),
       )) as PublicKeyCredential | null;
-      if (!credential) throw new Error("Passkey sign-in cancelled");
+      if (!credential) return;
       await api("/api/auth/passkey/login/verify", {
         method: "POST",
         body: JSON.stringify({ credential: credentialToJson(credential) }),
@@ -60,7 +61,9 @@ export default function LoginPage() {
       await refresh();
       router.push(next);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Passkey sign-in failed");
+      if (!isPasskeyUserCancelled(err)) {
+        setError(err instanceof Error ? err.message : "Passkey sign-in failed");
+      }
     } finally {
       setLoading(false);
     }

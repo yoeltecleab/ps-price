@@ -8,8 +8,8 @@ Track PlayStation Store game prices, view price history, and get email alerts wh
 docker compose up --build
 ```
 
-- **Web app:** http://127.0.0.1:3000
-- **API / docs:** http://127.0.0.1:8000/docs
+- **Web app:** http://127.0.0.1:3000  
+- **API:** proxied at http://127.0.0.1:3000/api/* (backend is internal-only in Docker)
 
 On first deploy the **backend scheduler** syncs the full PlayStation catalog automatically. The frontend only reads from the API — it does not trigger sync on page load.
 
@@ -50,6 +50,8 @@ Copy `.env.example` to `.env` at the repo root (used by Docker Compose). All set
 | [docs/DEPLOYMENT-AWS.md](docs/DEPLOYMENT-AWS.md) | Single-EC2 AWS deployment (Caddy + TLS) |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design and data flow |
 | [docs/PRODUCT.md](docs/PRODUCT.md) | Product context |
+| [docs/SECURITY.md](docs/SECURITY.md) | Security model and production checklist |
+| [AGENTS.md](AGENTS.md) | **Required reading for AI agents** |
 | [backend/docs/BACKEND_GUIDE.md](backend/docs/BACKEND_GUIDE.md) | Backend walkthrough |
 | [backend/docs/API.md](backend/docs/API.md) | HTTP API reference |
 | [frontend/DESIGN.md](frontend/DESIGN.md) | Visual design system |
