@@ -1,4 +1,25 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ps-price-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-psprice}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-psprice}
+      POSTGRES_DB: ${POSTGRES_DB:-psprice}
+    volumes:
+      - ps-price-pg:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-psprice} -d ${POSTGRES_DB:-psprice}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - ps-price-network
+
   backend:
     build:
       context: ./backend
@@ -8,7 +29,7 @@ services:
       - path: .env
         required: false
     environment:
-      PS_PRICE_DATABASE_PATH: /data/ps_price.sqlite3
+      PS_PRICE_DATABASE_URL: postgresql://${POSTGRES_USER:-psprice}:${POSTGRES_PASSWORD:-psprice}@postgres:5432/${POSTGRES_DB:-psprice}
       PS_PRICE_CORS_ORIGINS: ${PS_PRICE_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       PS_PRICE_FEED_SYNC_INTERVAL_MINUTES: ${PS_PRICE_FEED_SYNC_INTERVAL_MINUTES:-60}
       PS_PRICE_SCHEDULER_ENABLED: ${PS_PRICE_SCHEDULER_ENABLED:-true}
@@ -16,15 +37,16 @@ services:
       PYTHONUNBUFFERED: "1"
     expose:
       - "8000"
-    volumes:
-      - ps-price-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 15s
     networks:
       - ps-price-network
     labels:
@@ -50,7 +72,7 @@ services:
       - "com.alphixy.ps-price=frontend"
 
 volumes:
-  ps-price-data:
+  ps-price-pg:
     driver: local
 
 networks:

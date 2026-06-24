@@ -33,9 +33,23 @@ def test_user_is_admin() -> None:
 
 
 def test_production_settings_validation() -> None:
+    with pytest.raises(RuntimeError, match="DATABASE_URL"):
+        Settings(
+            production_mode=True,
+            admin_emails="admin@example.com",
+            cookie_secure=True,
+            frontend_url="https://psprice.example.com",
+            webauthn_rp_id="psprice.example.com",
+            webauthn_origin="https://psprice.example.com",
+            jwt_secret="production-secret-at-least-32-characters-long",
+            internal_api_key="production-internal-api-key-at-least-32-chars",
+            cors_origins="https://psprice.example.com",
+        ).validate_production_settings()
+
     with pytest.raises(RuntimeError, match="ADMIN_EMAILS"):
         Settings(
             production_mode=True,
+            database_url="postgresql://user:pass@localhost:5432/psprice",
             admin_emails="",
             cookie_secure=True,
             frontend_url="https://psprice.example.com",
@@ -47,6 +61,7 @@ def test_production_settings_validation() -> None:
     with pytest.raises(RuntimeError, match="JWT_SECRET"):
         Settings(
             production_mode=True,
+            database_url="postgresql://user:pass@localhost:5432/psprice",
             admin_emails="admin@example.com",
             cookie_secure=True,
             frontend_url="https://psprice.example.com",
@@ -56,6 +71,7 @@ def test_production_settings_validation() -> None:
 
     Settings(
         production_mode=True,
+        database_url="postgresql://user:pass@localhost:5432/psprice",
         admin_emails="admin@example.com",
         cookie_secure=True,
         frontend_url="https://psprice.example.com",
@@ -104,6 +120,7 @@ def test_healthz_scheduler_requires_internal_key() -> None:
 def test_production_rejects_weak_internal_api_key() -> None:
     base = dict(
         production_mode=True,
+        database_url="postgresql://user:pass@localhost:5432/psprice",
         admin_emails="admin@example.com",
         cookie_secure=True,
         frontend_url="https://psprice.example.com",

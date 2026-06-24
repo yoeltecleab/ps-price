@@ -13,6 +13,9 @@
 #   - .env filled out with production values (especially PS_PRICE_CORS_ORIGINS)
 
 services:
+  postgres:
+    ports: !reset []
+
   backend:
     restart: unless-stopped
     ports: !reset []

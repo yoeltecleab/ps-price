@@ -61,8 +61,8 @@ This guide takes you from zero AWS knowledge to a running PS Price deployment on
       │   └────────────┬──────────────────┘   │
       │                │                      │
       │   ┌────────────▼──────────────────┐   │
-      │   │  SQLite on Docker volume      │   │
-      │   │  /data/ps_price.sqlite3       │   │
+      │   │  postgres (PostgreSQL 16)     │   │
+      │   │  Docker volume ps-price-pg    │   │
       │   └───────────────────────────────┘   │
       │                                       │
       │   Elastic IP: 3.x.x.x (static)        │
@@ -74,7 +74,7 @@ This guide takes you from zero AWS knowledge to a running PS Price deployment on
 - **One EC2** — simple and cheap. No load balancer required.
 - **Caddy** — automatic free HTTPS from Let's Encrypt when you have a domain.
 - **Ports 3000 and 8000 are not public** — only Caddy on 80/443 faces the internet.
-- **SQLite** lives on a Docker volume (`ps-price-data`). Run **one** backend instance only.
+- **PostgreSQL** runs as a Docker service (`postgres`) with data on volume `ps-price-pg`. Run **one** backend instance only.
 
 | AWS term | Plain English |
 |----------|---------------|
@@ -146,7 +146,7 @@ Create an IAM user with console access instead of using the root account daily.
 
 6. **Network:** Allow **SSH from My IP**.
 
-7. **Storage:** **30 GiB gp3** (default is fine — SQLite database lives on Docker volume on root disk).
+7. **Storage:** **30 GiB gp3** (default is fine — PostgreSQL data lives on Docker volume `ps-price-pg` on the root disk).
 
 8. **Launch instance**.
 
@@ -252,7 +252,10 @@ nano .env
 **Production values** (adjust for your Elastic IP or domain). See also §21 for the full security checklist.
 
 ```env
-PS_PRICE_DATABASE_PATH=/data/ps_price.sqlite3
+POSTGRES_USER=psprice
+POSTGRES_PASSWORD=replace-with-openssl-rand-base64-48
+POSTGRES_DB=psprice
+PS_PRICE_DATABASE_URL=postgresql://psprice:replace-with-openssl-rand-base64-48@postgres:5432/psprice
 PS_PRICE_STORE_LOCALE=en-us
 
 PS_PRICE_PRODUCTION_MODE=true
@@ -457,18 +460,18 @@ docker compose -f docker-compose.yml -f docker-compose.aws.yml up -d --build
 
 ## 20. Backups
 
-SQLite database lives in the Docker volume `ps-price_ps-price-data`.
+PostgreSQL data lives in the Docker volume `psprice_ps-price-pg` (prefix may vary by project directory name).
 
 ```bash
-# Logical backup
-docker compose -f docker-compose.yml -f docker-compose.aws.yml exec backend \
-  sqlite3 /data/ps_price.sqlite3 ".backup /data/backup.sqlite3"
-
-# Copy to home directory
-docker cp ps-price-backend:/data/backup.sqlite3 ~/ps-price-backup-$(date +%Y%m%d).sqlite3
+# Logical dump (custom format)
+docker compose -f docker-compose.yml -f docker-compose.aws.yml exec -T postgres \
+  pg_dump -U psprice -Fc psprice > ~/ps-price-backup-$(date +%Y%m%d).dump
 
 # Download to your laptop
-# scp -i ~/.ssh/ps-price-key.pem ubuntu@54.123.45.67:~/ps-price-backup-*.sqlite3 ./
+# scp -i ~/.ssh/ps-price-key.pem ubuntu@54.123.45.67:~/ps-price-backup-*.dump ./
+
+# Restore (empty database required)
+# docker compose exec -T postgres pg_restore -U psprice -d psprice --clean --if-exists < backup.dump
 ```
 
 > **Never run** `docker compose down -v` in production — `-v` deletes the database volume.

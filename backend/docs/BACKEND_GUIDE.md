@@ -86,19 +86,25 @@ Important settings:
 
 `get_settings()` is cached — call it anywhere; you always get the same object.
 
-### 2. Database (`database.py`)
+### 2. Database (`database.py` + `app/db/`)
 
-We use **SQLite** — a single file database, perfect for local apps and Docker volumes.
+**Docker / production** uses **PostgreSQL** via `PS_PRICE_DATABASE_URL`. **Local pytest** defaults to **SQLite** (`PS_PRICE_DATABASE_PATH`) when no URL is set.
 
 ```python
-from backend.app.database import Database
+from backend.app.database import create_database, Database
+from backend.app.config import get_settings
 
-db = Database("data/ps_price.sqlite3")
-db.migrate()  # Creates tables if they don't exist
+db = create_database(get_settings())  # picks Postgres or SQLite from settings
+db.migrate()
 
 with db.connect() as conn:
     rows = conn.execute("SELECT * FROM games LIMIT 5").fetchall()
 ```
+
+| Setting | When |
+|---------|------|
+| `PS_PRICE_DATABASE_URL` | Docker Compose, production (required when `PRODUCTION_MODE=true`) |
+| `PS_PRICE_DATABASE_PATH` | Local tests / CLI without Postgres |
 
 **Tables:**
 

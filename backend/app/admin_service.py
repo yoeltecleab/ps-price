@@ -32,8 +32,7 @@ class AdminService:
         user_stats = self.auth_repo.admin_user_stats()
         insights = self.repo.admin_insights()
         sync = self.price_service.catalog_refresh_status()
-        db_path = Path(self.settings.database_path)
-        db_bytes = db_path.stat().st_size if db_path.exists() else 0
+        db_info = self._database_info()
         return {
             "users": user_stats,
             "catalog": {
@@ -55,12 +54,35 @@ class AdminService:
                 "smtp_configured": self.settings.smtp_configured,
                 "store_locale": self.settings.store_locale,
                 "production_mode": self.settings.production_mode,
-                "database_bytes": db_bytes,
-                "database_path": str(db_path),
+                "database_backend": db_info["backend"],
+                "database_bytes": db_info["bytes"],
+                "database_path": db_info["path"],
+                "database_url_set": db_info["url_set"],
                 "rate_limit_buckets": rate_limiter.active_bucket_count(),
                 "check_interval_minutes": self.settings.check_interval_minutes,
                 "feed_sync_interval_minutes": self.settings.feed_sync_interval_minutes,
             },
+        }
+
+    def _database_info(self) -> dict:
+        if self.settings.database_url:
+            with self.repo.db.connect() as conn:
+                row = conn.execute(
+                    "SELECT pg_database_size(current_database()) AS size"
+                ).fetchone()
+            size = row[0]
+            return {
+                "backend": "postgresql",
+                "bytes": int(size),
+                "path": "",
+                "url_set": True,
+            }
+        db_path = Path(self.settings.database_path)
+        return {
+            "backend": "sqlite",
+            "bytes": db_path.stat().st_size if db_path.exists() else 0,
+            "path": str(db_path),
+            "url_set": False,
         }
 
     def insights(self) -> dict:

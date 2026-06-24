@@ -31,7 +31,7 @@ Browser → Next.js (public) → /api/* proxy → FastAPI (internal only)
                           X-PS-Price-Internal header
 ```
 
-- SQLite lives on a Docker volume; single backend instance only.
+- **PostgreSQL** runs as a Docker service (`postgres`); data on volume `ps-price-pg`. Single backend instance only.
 - Admin = verified user + email in `PS_PRICE_ADMIN_EMAILS`.
 
 ## 4. When finishing work

@@ -44,7 +44,7 @@ from backend.app.auth_routes import router as auth_router
 from backend.app.admin_routes import router as admin_router
 from backend.app.auth_service import AuthService
 from backend.app.config import Settings, get_settings
-from backend.app.database import Database
+from backend.app.database import Database, create_database
 from backend.app.deps import AdminUserDep, OptionalUserDep, VerifiedUserDep
 from backend.app.notifier import EmailNotifier
 from backend.app.ps_store import PlayStationStoreClient
@@ -107,7 +107,7 @@ async def lifespan(app: FastAPI):
     settings.validate_production_settings()
 
     # --- Wire up persistence and services (order matters: DB first) ---
-    db = Database(settings.database_path)
+    db = create_database(settings)
     db.migrate()
     repo = Repository(db)
     auth_repo = AuthRepository(db)

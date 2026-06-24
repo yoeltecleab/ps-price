@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     # --- General app ---
     app_name: str = "PS Price"
     database_path: str = "backend/data/ps_price.sqlite3"
+    database_url: str | None = None  # e.g. postgresql://user:pass@host:5432/psprice
 
     # --- PlayStation Store HTTP client ---
     store_origin: str = "https://store.playstation.com"
@@ -125,6 +126,8 @@ class Settings(BaseSettings):
         """
         if not self.production_mode:
             return
+        if not self.database_url:
+            raise RuntimeError("PS_PRICE_DATABASE_URL must be set when PS_PRICE_PRODUCTION_MODE=true")
         if not self.cookie_secure:
             raise RuntimeError("PS_PRICE_COOKIE_SECURE must be true when PS_PRICE_PRODUCTION_MODE=true")
         if self.frontend_url.startswith("http://"):
