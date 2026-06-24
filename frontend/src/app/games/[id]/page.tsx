@@ -17,7 +17,6 @@ import { motion } from "motion/react";
 import { api } from "@/lib/api";
 import type { GameDetail, Watch } from "@/lib/types";
 import { formatDateTime, parseDollarsToCents } from "@/lib/format";
-import { refreshCatalogPrices } from "@/lib/catalogRefresh";
 import { PriceChart } from "@/components/PriceChart";
 import { AlertEmailSelect } from "@/components/AlertEmailSelect";
 import { WatchAlertFields } from "@/components/WatchAlertFields";
@@ -73,9 +72,9 @@ export default function GameDetailPage({
     setRefreshing(true);
     setRefreshNotice(null);
     try {
-      const result = await refreshCatalogPrices();
-      if (result.message) setRefreshNotice(result.message);
-      await loadGame();
+      const updated = await api<GameDetail>(`/api/games/${gameId}/refresh`, { method: "POST" });
+      setGame((prev) => (prev ? { ...prev, ...updated, history: prev.history } : updated));
+      setRefreshNotice("Game details refreshed from PlayStation Store.");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Refresh failed");
     } finally {

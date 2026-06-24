@@ -384,14 +384,14 @@ async def resend_verification(user: CurrentUserDep, request: Request, auth: Auth
 
 @router.post("/forgot-password")
 async def forgot_password(body: ForgotPasswordBody, request: Request, auth: AuthServiceDep):
-    """Request reset email. Always returns ``{"sent": true}`` (no email enumeration)."""
+    """Request reset email. Returns whether an account matched the address."""
     rate_limiter.check(
         f"forgot:{body.email.strip().lower()}",
         limit=3,
         window_seconds=3600,
     )
-    await auth.forgot_password(body.email)
-    return {"sent": True}
+    sent = await auth.forgot_password(body.email)
+    return {"sent": sent}
 
 
 @router.post("/reset-password")

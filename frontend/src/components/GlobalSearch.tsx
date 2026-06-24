@@ -177,9 +177,20 @@ export function GlobalSearch() {
     }
   }
 
+  function editionTags(item: SearchResult): string[] {
+    const tags: string[] = [];
+    for (const platform of item.platforms ?? []) {
+      if (platform && !tags.includes(platform)) tags.push(platform);
+    }
+    const name = item.name.toLowerCase();
+    if (name.includes("upgrade") || name.includes("dlc")) tags.push("DLC");
+    return tags;
+  }
+
   function renderResult(item: SearchResult, index: number) {
+    const tags = editionTags(item);
     return (
-      <li key={item.id} role="option" aria-selected={index === activeIndex}>
+      <li key={item.id ?? item.product_id} role="option" aria-selected={index === activeIndex}>
         <button
           type="button"
           onMouseDown={(e) => e.preventDefault()}
@@ -205,12 +216,31 @@ export function GlobalSearch() {
           </div>
           <div className="min-w-0 flex-1">
             <p className="text-base font-medium text-ink truncate">{item.name}</p>
-            <p className="text-sm font-data text-muted mt-0.5">
-              {item.current_price_formatted ?? "Price unavailable"}
-              {item.discount_percent ? (
-                <span className="text-accent ml-2">−{item.discount_percent}%</span>
-              ) : null}
+            {tags.length ? (
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {tags.map((tag) => (
+                  <span
+                    key={tag}
+                    className={[
+                      "font-data text-[11px] uppercase tracking-wider px-2 py-0.5 rounded-full border",
+                      tag === "DLC"
+                        ? "border-border text-muted"
+                        : "border-primary/40 text-primary",
+                    ].join(" ")}
+                  >
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <div className="shrink-0 text-right pl-2">
+            <p className="font-display text-lg font-bold tabular-nums text-ink">
+              {item.current_price_formatted ?? "—"}
             </p>
+            {item.discount_percent ? (
+              <p className="font-data text-xs text-accent mt-0.5">−{item.discount_percent}%</p>
+            ) : null}
           </div>
           {item.is_tracked ? (
             <span className="shrink-0 text-[13px] font-data uppercase tracking-widest text-accent px-2 py-0.5 rounded-full border border-accent/30">

@@ -12,7 +12,7 @@ import { Button } from "@/components/Button";
 import { Input } from "@/components/Input";
 
 export default function AccountPage() {
-  const { user, notificationEmails, refresh, signOut } = useAuth();
+  const { user, notificationEmails, passkeys, refresh, signOut } = useAuth();
   const [newEmail, setNewEmail] = useState("");
   const [label, setLabel] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
@@ -60,6 +60,20 @@ export default function AccountPage() {
   async function removeEmail(id: number) {
     await api(`/api/auth/notification-emails/${id}`, { method: "DELETE" });
     await refresh();
+  }
+
+  async function removePasskey(id: number) {
+    setLoading(true);
+    setMessage(null);
+    try {
+      await api(`/api/auth/passkeys/${id}`, { method: "DELETE" });
+      setMessage("Passkey removed.");
+      await refresh();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Failed to remove passkey");
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function changePassword(e: React.FormEvent) {
@@ -253,6 +267,31 @@ export default function AccountPage() {
       <section className="holo-panel rounded-[var(--radius-xl)] p-6 space-y-4">
         <h2 className="font-data text-xs uppercase tracking-widest text-accent">Passkeys</h2>
         <p className="text-sm text-muted">Sign in without a password using Face ID, Touch ID, or a security key.</p>
+        {passkeys.length ? (
+          <ul className="space-y-2">
+            {passkeys.map((row) => (
+              <li
+                key={row.id}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-[var(--radius-md)] border border-border/50 px-4 py-3"
+              >
+                <div>
+                  <p className="text-sm text-ink">{row.friendly_name || "Passkey"}</p>
+                  <p className="text-xs text-muted">
+                    Added {new Date(row.created_at).toLocaleDateString()}
+                    {row.last_used_at
+                      ? ` · Last used ${new Date(row.last_used_at).toLocaleDateString()}`
+                      : ""}
+                  </p>
+                </div>
+                <Button size="sm" variant="secondary" onClick={() => removePasskey(row.id)} loading={loading}>
+                  Remove
+                </Button>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-sm text-muted">No passkeys registered yet.</p>
+        )}
         <Button onClick={addPasskey} loading={loading} variant="secondary">
           Register passkey
         </Button>

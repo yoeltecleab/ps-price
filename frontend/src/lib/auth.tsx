@@ -11,11 +11,12 @@ import {
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { safeRedirectPath } from "@/lib/safeRedirect";
-import type { AuthUser, MeResponse, NotificationEmail } from "@/lib/types";
+import type { AuthUser, MeResponse, NotificationEmail, Passkey } from "@/lib/types";
 
 type AuthState = {
   user: AuthUser | null;
   notificationEmails: NotificationEmail[];
+  passkeys: Passkey[];
   loading: boolean;
   refresh: () => Promise<void>;
   signOut: () => Promise<void>;
@@ -28,6 +29,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [notificationEmails, setNotificationEmails] = useState<NotificationEmail[]>([]);
+  const [passkeys, setPasskeys] = useState<Passkey[]>([]);
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
@@ -35,9 +37,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const data = await api<MeResponse>("/api/auth/me");
       setUser(data.user);
       setNotificationEmails(data.notification_emails);
+      setPasskeys(data.passkeys);
     } catch {
       setUser(null);
       setNotificationEmails([]);
+      setPasskeys([]);
     } finally {
       setLoading(false);
     }
@@ -51,6 +55,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await api("/api/auth/logout", { method: "POST" });
     setUser(null);
     setNotificationEmails([]);
+    setPasskeys([]);
     router.push("/");
   }, [router]);
 
@@ -70,8 +75,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const value = useMemo(
-    () => ({ user, notificationEmails, loading, refresh, signOut, requireVerified }),
-    [user, notificationEmails, loading, refresh, signOut, requireVerified],
+    () => ({ user, notificationEmails, passkeys, loading, refresh, signOut, requireVerified }),
+    [user, notificationEmails, passkeys, loading, refresh, signOut, requireVerified],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

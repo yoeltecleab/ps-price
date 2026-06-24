@@ -165,32 +165,15 @@ export interface NotificationEmail {
   created_at: string;
 }
 
-export interface MeResponse {
-  user: AuthUser;
-  notification_emails: NotificationEmail[];
-  passkeys: { id: number; friendly_name: string | null; created_at: string }[];
-}
-
-export interface AuthUser {
+export interface Passkey {
   id: number;
-  email: string;
-  display_name: string | null;
-  email_verified: boolean;
-  has_password: boolean;
-  is_admin: boolean;
-}
-
-export interface NotificationEmail {
-  id: number;
-  email: string;
-  label: string | null;
-  verified: boolean;
-  is_primary: boolean;
+  friendly_name: string | null;
   created_at: string;
+  last_used_at?: string | null;
 }
 
 export interface MeResponse {
   user: AuthUser;
   notification_emails: NotificationEmail[];
-  passkeys: { id: number; friendly_name: string | null; created_at: string }[];
+  passkeys: Passkey[];
 }

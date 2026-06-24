@@ -88,7 +88,7 @@ class Settings(BaseSettings):
     catalog_category_id: str = STORE_CATALOG_GRID_ID
     catalog_sync_shards: str = "all,PS5,PS4"  # comma-separated browse shards
     graphql_page_size: int = Field(default=100, ge=10, le=200)
-    graphql_min_interval_seconds: float = 1.0
+    graphql_min_interval_seconds: float = 0.4
     catalog_sync_max_pages: int | None = None  # None = no artificial cap
     deals_sync_max_pages: int | None = None
 

@@ -2,6 +2,7 @@ import { api } from "@/lib/api";
 
 export type CatalogRefreshResult = {
   synced?: boolean;
+  syncing?: boolean;
   cooldown?: boolean;
   message?: string;
   retry_after_seconds?: number;
@@ -22,6 +23,7 @@ export type SyncStatus = {
   cooldown_seconds?: number;
   retry_after_seconds?: number;
   can_refresh?: boolean;
+  syncing?: boolean;
 };
 
 export async function fetchSyncStatus(): Promise<SyncStatus> {

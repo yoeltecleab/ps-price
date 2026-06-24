@@ -49,6 +49,7 @@ import httpx
 
 from backend.app.domain import SearchResult
 from backend.app.money import currency_for_locale, money_to_cents
+from backend.app.name_utils import clean_game_name, infer_edition_name
 from backend.app.ps_store import _select_image, product_url
 
 # Base URL for all GraphQL operations (GET requests with query params).
@@ -133,7 +134,7 @@ def parse_graphql_product(
     return SearchResult(
         product_id=product_id,
         locale=locale,
-        name=name,
+        name=clean_game_name(name),
         store_url=product_url(origin, locale, product_id),
         image_url=_select_image(product.get("media")),
         platforms=platforms,
@@ -194,9 +195,9 @@ def parse_graphql_concept_products(
 
         product_name = merged.get("name")
         if isinstance(product_name, str) and product_name.strip():
-            display_name = product_name.strip()
+            display_name = clean_game_name(product_name.strip())
         elif len(products) > 1:
-            display_name = f"{base_name} ({product_id.rsplit('-', 1)[-1]})"
+            display_name = infer_edition_name(base_name, product_id)
         else:
             display_name = base_name
 

@@ -63,6 +63,7 @@ import httpx
 
 from backend.app.config import Settings
 from backend.app.domain import ProductSnapshot, SearchResult
+from backend.app.name_utils import clean_game_name
 from backend.app.money import currency_for_locale, format_cents, money_to_cents
 
 
@@ -609,6 +610,7 @@ def parse_search_page(page_html: str, locale: str, origin: str) -> list[SearchRe
             continue
         if not isinstance(name, str) or not name:
             name = product_id
+        name = clean_game_name(name)
         seen.add(product_id)
         price = product.get("price") if isinstance(product.get("price"), dict) else {}
         currency = currency_for_locale(locale)

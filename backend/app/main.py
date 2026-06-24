@@ -124,12 +124,8 @@ async def lifespan(app: FastAPI):
     async def _startup_catalog_sync() -> None:
         if not settings.sync_on_startup:
             return
-        try:
-            logger.info("Startup catalog sync beginning")
-            result = await service.sync_catalog(force=True)
-            logger.info("Startup catalog sync finished: %s", result)
-        except Exception:
-            logger.exception("Startup catalog sync failed")
+        logger.info("Startup catalog sync queued")
+        await service.start_catalog_sync(force=True)
 
     startup_sync_task = asyncio.create_task(
         _startup_catalog_sync(), name="ps-price-startup-sync"
@@ -364,14 +360,14 @@ def list_games(
 
 
 @app.get("/api/games/{game_id}", response_model=GameDetail)
-def get_game(
+async def get_game(
     game_id: int,
     service: Annotated[PriceService, Depends(service_dep)],
     user: OptionalUserDep,
 ):
     try:
         user_id = user["id"] if user else None
-        return service.get_game_detail(game_id, user_id=user_id)
+        return await service.get_game_detail(game_id, user_id=user_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="game not found") from exc
 

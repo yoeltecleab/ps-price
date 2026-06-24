@@ -35,6 +35,7 @@ from datetime import UTC, datetime, timedelta
 
 from backend.app.database import Database, row_to_dict
 from backend.app.domain import ProductSnapshot, SearchResult
+from backend.app.name_utils import clean_game_name
 from backend.app.money import discount_percent
 
 
@@ -432,6 +433,7 @@ class Repository:
                 existing_dict = dict(existing) if existing else None
                 pct = discount_percent(entry.current_price_cents, entry.original_price_cents)
                 platforms_json = json.dumps(entry.platforms)
+                display_name = clean_game_name(entry.name)
                 # Derive a simple availability label from the price fields.
                 availability = "available"
                 if entry.current_price_cents == 0:
@@ -489,7 +491,7 @@ class Repository:
                         WHERE id = ?
                         """,
                         (
-                            entry.name,
+                            display_name,
                             entry.category,
                             entry.image_url,
                             entry.store_url,
@@ -536,7 +538,7 @@ class Repository:
                         (
                             entry.product_id,
                             entry.locale,
-                            entry.name,
+                            display_name,
                             entry.category,
                             entry.image_url,
                             entry.store_url,

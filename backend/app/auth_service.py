@@ -388,15 +388,16 @@ class AuthService:
     # Password reset and change
     # -------------------------------------------------------------------------
 
-    async def forgot_password(self, email: str) -> None:
-        """Email a reset link if the account exists; otherwise do nothing.
+    async def forgot_password(self, email: str) -> bool:
+        """Email a reset link when the account exists.
 
-        Intentionally no error when email is unknown — prevents account enumeration.
+        Returns:
+            True when a reset email was sent, False when the address is unknown.
         """
         normalized = self._validate_email(email)
         user = self.auth_repo.get_user_by_email(normalized)
         if not user:
-            return
+            return False
         token = self.auth_repo.create_password_reset_token(user["id"])
         link = f"{self.settings.frontend_url.rstrip('/')}/auth/reset-password?token={token}"
         theme = user.get("preferred_theme_id") or "abyss"
@@ -409,13 +410,15 @@ class AuthService:
             html_body=system_email_html(
                 theme_id=theme,
                 title="Reset your password",
-                message="We received a request to reset your password. If you did not ask for this, you can ignore this email.",
+                message="We received a request to reset your password. Tap below to choose a new one.",
                 cta_label="Reset password",
                 cta_href=link,
+                kind="reset",
             ),
             user_id=user["id"],
             theme_id=theme,
         )
+        return True
 
     def reset_password(self, token: str, new_password: str) -> None:
         """Set a new password from a reset link and log out all sessions.
@@ -861,6 +864,7 @@ class AuthService:
                 message="Welcome to PS Prices. Confirm your email to track games, deploy price watches, and receive alerts in your chosen theme.",
                 cta_label="Verify email",
                 cta_href=link,
+                kind="verify",
             ),
             user_id=user["id"],
             theme_id=theme,
