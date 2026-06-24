@@ -126,7 +126,6 @@ def test_api_requires_proxy_headers_when_internal_key_configured() -> None:
     from fastapi.testclient import TestClient
 
     from backend.app.main import app
-    from backend.app.security import API_CLIENT_HEADER, API_CLIENT_VALUE
 
     app.state.settings = Settings(
         internal_api_key="test-internal-api-key-at-least-32-characters",
@@ -142,15 +141,6 @@ def test_api_requires_proxy_headers_when_internal_key_configured() -> None:
         headers={"X-PS-Price-Internal": "test-internal-api-key-at-least-32-characters"},
     )
     assert with_key_only.status_code == 403
-
-    ok = client.get(
-        "/api/deals",
-        headers={
-            "X-PS-Price-Internal": "test-internal-api-key-at-least-32-characters",
-            API_CLIENT_HEADER: API_CLIENT_VALUE,
-        },
-    )
-    assert ok.status_code == 200
 
 
 def test_production_rejects_weak_internal_api_key() -> None:

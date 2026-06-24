@@ -106,6 +106,7 @@ export interface AdminNotificationRow {
   id: number;
   email: string;
   subject: string;
+  body: string;
   status: string;
   reason: string | null;
   error: string | null;

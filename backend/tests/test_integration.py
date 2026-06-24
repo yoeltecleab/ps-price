@@ -56,6 +56,32 @@ def test_auth_me_anonymous_returns_null_user(client):
     assert data["passkeys"] == []
 
 
+def test_search_anonymous_without_auth(client, monkeypatch):
+    """Catalog search is public — no login required."""
+
+    async def fake_search(query, locale=None, limit=10, user_id=None):
+        assert user_id is None
+        return [
+            {
+                "id": 1,
+                "product_id": "UP0001",
+                "locale": "en-us",
+                "name": f"Result for {query}",
+                "store_url": "https://store.playstation.com/x",
+                "current_price_formatted": "$9.99",
+                "discount_text": None,
+                "image_url": None,
+            }
+        ]
+
+    monkeypatch.setattr(client.app.state.service, "search", fake_search)
+    response = client.get("/api/search?q=god&limit=5")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 1
+    assert "god" in data[0]["name"]
+
+
 def test_search_games_requires_query(client):
     """Test that search requires a query parameter."""
     response = client.get("/api/search")

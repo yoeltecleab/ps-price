@@ -6,20 +6,8 @@ import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { MagnifyingGlass, Command } from "@phosphor-icons/react";
 import { motion, AnimatePresence } from "motion/react";
+import { api, ApiError } from "@/lib/api";
 import type { SearchResult } from "@/lib/types";
-
-function parseFetchError(body: string, status: number): string {
-  try {
-    const data = JSON.parse(body) as { detail?: string | { msg?: string }[] };
-    if (typeof data.detail === "string") return data.detail;
-    if (Array.isArray(data.detail)) {
-      return data.detail.map((d) => d.msg ?? "").filter(Boolean).join(", ");
-    }
-  } catch {
-    /* ignore */
-  }
-  return body || `Search failed (${status})`;
-}
 
 export function GlobalSearch() {
   const router = useRouter();
@@ -67,15 +55,10 @@ export function GlobalSearch() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(
+      const data = await api<SearchResult[]>(
         `/api/search?q=${encodeURIComponent(trimmed)}&limit=48`,
-        { signal: controller.signal, cache: "no-store" },
+        { signal: controller.signal },
       );
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(parseFetchError(text, res.status));
-      }
-      const data = (await res.json()) as SearchResult[];
       if (!controller.signal.aborted) {
         setResults(data.filter((row) => row.id != null));
         setActiveIndex(data.length ? 0 : -1);
@@ -84,7 +67,7 @@ export function GlobalSearch() {
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") return;
       setResults([]);
-      setError(e instanceof Error ? e.message : "Search failed");
+      setError(e instanceof ApiError ? e.message : e instanceof Error ? e.message : "Search failed");
     } finally {
       if (!controller.signal.aborted) setLoading(false);
     }
