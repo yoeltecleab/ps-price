@@ -21,7 +21,13 @@ async function parseError(res: Response): Promise<string> {
   return res.statusText || "Request failed";
 }
 
-const AUTH_PATHS = ["/api/auth/login", "/api/auth/register", "/api/auth/refresh", "/api/auth/logout"];
+const AUTH_PATHS = [
+  "/api/auth/login",
+  "/api/auth/register",
+  "/api/auth/refresh",
+  "/api/auth/logout",
+  "/api/auth/me",
+];
 
 async function tryRefreshAccessToken(): Promise<boolean> {
   const res = await fetch("/api/auth/refresh", { method: "POST", credentials: "include" });

@@ -33,6 +33,7 @@ from backend.app.config import Settings
 from backend.app.deps import (
     AuthServiceDep,
     CurrentUserDep,
+    OptionalUserDep,
     RefreshTokenDep,
     SettingsDep,
     VerifiedUserDep,
@@ -335,11 +336,10 @@ def logout(
 
 
 @router.get("/me")
-def me(user: CurrentUserDep, auth: AuthServiceDep, settings: SettingsDep):
-    """Return current user, notification emails, passkeys, and admin flag.
-
-    ``CurrentUserDep`` loads the user from the session cookie or returns 401.
-    """
+def me(user: OptionalUserDep, auth: AuthServiceDep, settings: SettingsDep):
+    """Return current user profile, or ``user: null`` when not signed in (HTTP 200)."""
+    if not user:
+        return {"user": None, "notification_emails": [], "passkeys": []}
     return {
         "user": {**user, "is_admin": user_is_admin(user, settings)},
         "notification_emails": auth.list_notification_emails(user["id"]),

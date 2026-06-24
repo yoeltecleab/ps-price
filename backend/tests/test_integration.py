@@ -46,6 +46,16 @@ def test_healthz_with_scheduler_status(client):
     assert response.status_code == 403
 
 
+def test_auth_me_anonymous_returns_null_user(client):
+    """Session probe should succeed without credentials (no 401 cascade)."""
+    response = client.get("/api/auth/me")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["user"] is None
+    assert data["notification_emails"] == []
+    assert data["passkeys"] == []
+
+
 def test_search_games_requires_query(client):
     """Test that search requires a query parameter."""
     response = client.get("/api/search")

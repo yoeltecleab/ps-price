@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Activity, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import type { Notification } from "@/lib/types";
 import { formatDateTime } from "@/lib/format";
 import { EmptyState } from "@/components/EmptyState";
@@ -20,6 +21,7 @@ const statusVariant = (
 };
 
 export default function NotificationsPage() {
+  const { user, loading: authLoading, requireVerified } = useAuth();
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -39,8 +41,14 @@ export default function NotificationsPage() {
   }, []);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    if (authLoading) return;
+    if (!user?.email_verified) {
+      requireVerified("/notifications");
+      setLoading(false);
+      return;
+    }
+    void load();
+  }, [authLoading, user, load, requireVerified]);
 
   function toggleSelect(id: number, checked: boolean) {
     setSelected((prev) => {

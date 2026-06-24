@@ -27,7 +27,7 @@ function ruleSummary(watch: Watch) {
 }
 
 export default function WatchesPage() {
-  const { notificationEmails, refresh } = useAuth();
+  const { user, loading: authLoading, requireVerified, notificationEmails, refresh } = useAuth();
   const [watches, setWatches] = useState<Watch[]>([]);
   const [games, setGames] = useState<Map<number, Game>>(new Map());
   const [loading, setLoading] = useState(true);
@@ -52,8 +52,14 @@ export default function WatchesPage() {
   }, []);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    if (authLoading) return;
+    if (!user?.email_verified) {
+      requireVerified("/watches");
+      setLoading(false);
+      return;
+    }
+    void load();
+  }, [authLoading, user, load, requireVerified]);
 
   async function toggleWatch(watch: Watch) {
     try {

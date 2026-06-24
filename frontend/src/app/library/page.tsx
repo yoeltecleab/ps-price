@@ -15,7 +15,7 @@ import { refreshCatalogPrices } from "@/lib/catalogRefresh";
 
 export default function LibraryPage() {
   const { theme } = useTheme();
-  const { requireVerified, notificationEmails, refresh } = useAuth();
+  const { user, loading: authLoading, requireVerified, notificationEmails, refresh } = useAuth();
   const [games, setGames] = useState<Game[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -36,8 +36,14 @@ export default function LibraryPage() {
   }, []);
 
   useEffect(() => {
-    loadGames();
-  }, [loadGames]);
+    if (authLoading) return;
+    if (!user?.email_verified) {
+      requireVerified("/library");
+      setLoading(false);
+      return;
+    }
+    void loadGames();
+  }, [authLoading, user, loadGames, requireVerified]);
 
   async function handleDelete(id: number) {
     try {

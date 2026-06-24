@@ -173,7 +173,7 @@ export interface Passkey {
 }
 
 export interface MeResponse {
-  user: AuthUser;
+  user: AuthUser | null;
   notification_emails: NotificationEmail[];
   passkeys: Passkey[];
 }
