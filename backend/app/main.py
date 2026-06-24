@@ -397,6 +397,8 @@ async def create_watch(
             payload.notify_on_any_drop,
             payload.enabled,
             payload.theme_id,
+            payload.min_drop_cents,
+            payload.min_drop_percent,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -419,6 +421,8 @@ async def bulk_create_watches(
             payload.notify_on_any_drop,
             payload.enabled,
             payload.theme_id,
+            payload.min_drop_cents,
+            payload.min_drop_percent,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -446,12 +450,26 @@ async def update_watch(
             if "target_price_cents" in payload.model_fields_set
             else UNSET
         )
+        min_drop_cents = (
+            payload.min_drop_cents if "min_drop_cents" in payload.model_fields_set else UNSET
+        )
+        min_drop_percent = (
+            payload.min_drop_percent if "min_drop_percent" in payload.model_fields_set else UNSET
+        )
+        notification_email_id = (
+            payload.notification_email_id
+            if "notification_email_id" in payload.model_fields_set
+            else UNSET
+        )
         return await service.update_watch(
             watch_id,
             user["id"],
             target_price,
             payload.notify_on_any_drop,
             payload.enabled,
+            min_drop_cents,
+            min_drop_percent,
+            notification_email_id,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

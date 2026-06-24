@@ -6,25 +6,12 @@ import { useState } from "react";
 import { safeRedirectPath } from "@/lib/safeRedirect";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import {
+  buildLoginOptions,
+  credentialToJson,
+} from "@/lib/webauthn";
 import { Button } from "@/components/Button";
 import { Input } from "@/components/Input";
-
-function bufferToBase64url(buffer: ArrayBuffer) {
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  bytes.forEach((b) => {
-    binary += String.fromCharCode(b);
-  });
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function base64urlToBuffer(value: string) {
-  const padded = value.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((value.length + 3) % 4);
-  const binary = atob(padded);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-  return bytes.buffer;
-}
 
 export default function LoginPage() {
   const router = useRouter();
@@ -62,42 +49,13 @@ export default function LoginPage() {
         method: "POST",
         body: JSON.stringify({ email: email || null }),
       });
-      const credential = (await navigator.credentials.get({
-        publicKey: {
-          challenge: base64urlToBuffer(options.challenge as string),
-          timeout: (options.timeout as number) || 60000,
-          rpId: options.rpId as string,
-          userVerification: "preferred",
-          allowCredentials: Array.isArray(options.allowCredentials)
-            ? (options.allowCredentials as { id: string; type: string; transports?: string[] }[]).map(
-                (c) => ({
-                  type: "public-key" as const,
-                  id: base64urlToBuffer(c.id),
-                  transports: c.transports as AuthenticatorTransport[] | undefined,
-                }),
-              )
-            : undefined,
-        },
-      })) as PublicKeyCredential | null;
+      const credential = (await navigator.credentials.get(
+        buildLoginOptions(options),
+      )) as PublicKeyCredential | null;
       if (!credential) throw new Error("Passkey sign-in cancelled");
-      const response = credential.response as AuthenticatorAssertionResponse;
       await api("/api/auth/passkey/login/verify", {
         method: "POST",
-        body: JSON.stringify({
-          credential: {
-            id: credential.id,
-            rawId: bufferToBase64url(credential.rawId),
-            type: credential.type,
-            response: {
-              clientDataJSON: bufferToBase64url(response.clientDataJSON),
-              authenticatorData: bufferToBase64url(response.authenticatorData),
-              signature: bufferToBase64url(response.signature),
-              userHandle: response.userHandle
-                ? bufferToBase64url(response.userHandle)
-                : null,
-            },
-          },
-        }),
+        body: JSON.stringify({ credential: credentialToJson(credential) }),
       });
       await refresh();
       router.push(next);
@@ -116,7 +74,7 @@ export default function LoginPage() {
       </div>
       <form onSubmit={handleSubmit} className="space-y-4">
         <Input label="Email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
-        <Input label="Password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+        <Input label="Password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
         {error ? <p className="text-sm text-error">{error}</p> : null}
         <Button type="submit" className="w-full" loading={loading}>
           Sign in

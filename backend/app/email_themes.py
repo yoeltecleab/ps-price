@@ -70,6 +70,18 @@ THEME_PALETTES: dict[str, dict[str, str]] = {
         "accent": "#0ea5e9",
         "border": "#dbeafe",
     },
+    "eclipse": {"bg": "#0a0510", "surface": "#140a1c", "ink": "#f5e8ff", "muted": "#a78bb8", "primary": "#c026d3", "accent": "#f472b6", "border": "#2d1a3d"},
+    "crimson": {"bg": "#0c0404", "surface": "#180808", "ink": "#ffe8e8", "muted": "#b88a8a", "primary": "#dc2626", "accent": "#f97316", "border": "#3d1a1a"},
+    "forest": {"bg": "#030a06", "surface": "#081410", "ink": "#e8f5ee", "muted": "#7a9a88", "primary": "#16a34a", "accent": "#4ade80", "border": "#1a3024"},
+    "fusion": {"bg": "#0a0514", "surface": "#140a24", "ink": "#f0e8ff", "muted": "#a88fd4", "primary": "#a855f7", "accent": "#e879f9", "border": "#2a1a48"},
+    "ink": {"bg": "#0a0a0c", "surface": "#141418", "ink": "#ececee", "muted": "#888890", "primary": "#52525b", "accent": "#a1a1aa", "border": "#27272a"},
+    "dusk": {"bg": "#0c0a14", "surface": "#16121f", "ink": "#ebe8f4", "muted": "#8a849c", "primary": "#7c3aed", "accent": "#a78bfa", "border": "#2a2438"},
+    "graphite": {"bg": "#101012", "surface": "#1a1a1e", "ink": "#e8e8ec", "muted": "#7a7a84", "primary": "#52525b", "accent": "#94a3b8", "border": "#2a2a30"},
+    "paper": {"bg": "#faf9f6", "surface": "#ffffff", "ink": "#1c1917", "muted": "#78716c", "primary": "#44403c", "accent": "#0d9488", "border": "#e7e5e4"},
+    "sand": {"bg": "#faf6f0", "surface": "#fffdf9", "ink": "#292524", "muted": "#78716c", "primary": "#b45309", "accent": "#d97706", "border": "#e7e0d6"},
+    "sky": {"bg": "#f0f9ff", "surface": "#ffffff", "ink": "#0c4a6e", "muted": "#64748b", "primary": "#0284c7", "accent": "#38bdf8", "border": "#dbeafe"},
+    "mint": {"bg": "#f0fdf4", "surface": "#ffffff", "ink": "#14532d", "muted": "#64748b", "primary": "#059669", "accent": "#34d399", "border": "#d1fae5"},
+    "pearl": {"bg": "#fdf8ff", "surface": "#ffffff", "ink": "#3b0764", "muted": "#7e7490", "primary": "#9333ea", "accent": "#e879f9", "border": "#f3e8ff"},
 }
 
 DEFAULT_THEME_ID = "abyss"

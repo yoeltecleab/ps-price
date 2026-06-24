@@ -297,6 +297,8 @@ class PriceService:
         notify_on_any_drop: bool,
         enabled: bool,
         theme_id: str | None = None,
+        min_drop_cents: int | None = None,
+        min_drop_percent: int | None = None,
     ) -> dict:
         """Create a watch for a library game and optionally notify immediately.
 
@@ -325,11 +327,16 @@ class PriceService:
             theme_id,
             user_id=user_id,
             notification_email_id=resolved_email_id,
+            min_drop_cents=min_drop_cents,
+            min_drop_percent=min_drop_percent,
         )
-        # Instant gratification: if the price already qualifies, email now.
+        preferred = self._preferred_theme(user_id)
         if enabled and self._target_met(watch, game):
             await self.notifier.send_price_notification(
-                watch, game, "target_met", theme_id=theme_id or watch.get("theme_id")
+                watch,
+                game,
+                "target_met",
+                user_preferred_theme=preferred,
             )
         return self.repo.get_watch(watch["id"]) or watch
 
@@ -342,6 +349,8 @@ class PriceService:
         notify_on_any_drop: bool,
         enabled: bool,
         theme_id: str | None = None,
+        min_drop_cents: int | None = None,
+        min_drop_percent: int | None = None,
     ) -> dict:
         """Create watches for multiple library games.
 
@@ -367,6 +376,8 @@ class PriceService:
                     notify_on_any_drop,
                     enabled,
                     theme_id,
+                    min_drop_cents,
+                    min_drop_percent,
                 )
                 created.append(watch)
             except Exception as exc:
@@ -380,20 +391,40 @@ class PriceService:
         target_price_cents: int | None | object = UNSET,
         notify_on_any_drop: bool | None = None,
         enabled: bool | None = None,
+        min_drop_cents: int | None | object = UNSET,
+        min_drop_percent: int | None | object = UNSET,
+        notification_email_id: int | None | object = UNSET,
     ) -> dict:
-        """Update watch settings (target price, drop alerts, enabled flag)."""
+        """Update watch settings including alert thresholds and notification email."""
         watch = self.repo.get_watch(watch_id, user_id)
         if not watch:
             raise KeyError("watch not found")
+        email_kw: str | object = UNSET
+        resolved_id_kw: int | None | object = UNSET
+        if notification_email_id is not UNSET:
+            email, resolved_id = self.auth_service.require_verified_notification_email(
+                user_id,
+                notification_email_id if notification_email_id is not None else watch.get("notification_email_id"),
+                None,
+            )
+            email_kw = email
+            resolved_id_kw = resolved_id
         updated = self.repo.update_watch(
-            watch_id, target_price_cents, notify_on_any_drop, enabled
+            watch_id,
+            target_price_cents,
+            notify_on_any_drop,
+            enabled,
+            min_drop_cents,
+            min_drop_percent,
+            resolved_id_kw,
+            email_kw,
         )
         if not updated:
             raise KeyError("watch not found")
         return updated
 
     async def test_watch(self, watch_id: int, user_id: int) -> dict:
-        """Send a test email so the user can preview notification formatting."""
+        """Send a preview email so the user can see alert formatting."""
         watch = self.repo.get_watch(watch_id, user_id)
         if not watch:
             raise KeyError("watch not found")
@@ -401,7 +432,11 @@ class PriceService:
         if not game:
             raise KeyError("game not found")
         return await self.notifier.send_price_notification(
-            watch, game, "test", test=True, theme_id=watch.get("theme_id")
+            watch,
+            game,
+            "preview",
+            test=True,
+            user_preferred_theme=self._preferred_theme(user_id),
         )
 
     # -------------------------------------------------------------------------
@@ -432,23 +467,39 @@ class PriceService:
             if (
                 reason is None
                 and watch.get("notify_on_any_drop")
-                and previous_price_cents is not None
-                and current < previous_price_cents
+                and self._drop_qualifies(watch, previous_price_cents, current)
             ):
-                reason = "price_drop"
+                reason = "min_drop" if watch.get("min_drop_cents") or watch.get("min_drop_percent") else "price_drop"
             if reason is None:
                 continue
-            # Anti-spam: do not re-notify unless the price dropped further.
             last_notified = watch.get("last_notified_price_cents")
             if last_notified is not None and current >= last_notified:
                 continue
+            preferred = self._preferred_theme(watch.get("user_id"))
             await self.notifier.send_price_notification(
                 watch,
                 game,
                 reason,
                 previous_price_cents=previous_price_cents,
-                theme_id=watch.get("theme_id"),
+                user_preferred_theme=preferred,
             )
+
+    def _preferred_theme(self, user_id: int | None) -> str | None:
+        if not user_id or not self.auth_service:
+            return None
+        user = self.auth_service.auth_repo.get_user_by_id(user_id)
+        return user.get("preferred_theme_id") if user else None
+
+    def _drop_qualifies(self, watch: dict, previous: int | None, current: int) -> bool:
+        if previous is None or current is None or current >= previous:
+            return False
+        drop_cents = previous - current
+        drop_pct = int(round(drop_cents / previous * 100)) if previous else 0
+        if watch.get("min_drop_cents") and drop_cents < watch["min_drop_cents"]:
+            return False
+        if watch.get("min_drop_percent") and drop_pct < watch["min_drop_percent"]:
+            return False
+        return True
 
     def _target_met(self, watch: dict, game: dict) -> bool:
         """Return True when the game's current price is at or below the watch target."""

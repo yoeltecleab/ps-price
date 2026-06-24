@@ -776,6 +776,8 @@ class Repository:
         *,
         user_id: int | None = None,
         notification_email_id: int | None = None,
+        min_drop_cents: int | None = None,
+        min_drop_percent: int | None = None,
     ) -> dict:
         """Create a new watch for the given game and return the stored row.
 
@@ -789,8 +791,9 @@ class Repository:
                 """
                 INSERT INTO watches (
                     game_id, email, target_price_cents, notify_on_any_drop, enabled,
-                    theme_id, user_id, notification_email_id, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    theme_id, user_id, notification_email_id, min_drop_cents, min_drop_percent,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     game_id,
@@ -801,6 +804,8 @@ class Repository:
                     theme_id,
                     user_id,
                     notification_email_id,
+                    min_drop_cents,
+                    min_drop_percent,
                     now,
                     now,
                 ),
@@ -825,6 +830,10 @@ class Repository:
         target_price_cents: int | None | object = UNSET,
         notify_on_any_drop: bool | None = None,
         enabled: bool | None = None,
+        min_drop_cents: int | None | object = UNSET,
+        min_drop_percent: int | None | object = UNSET,
+        notification_email_id: int | None | object = UNSET,
+        email: str | None | object = UNSET,
     ) -> dict | None:
         """Patch-update a watch row and return the updated row.
 
@@ -838,15 +847,35 @@ class Repository:
         new_target = current["target_price_cents"] if target_price_cents is UNSET else target_price_cents
         new_drop = current["notify_on_any_drop"] if notify_on_any_drop is None else int(notify_on_any_drop)
         new_enabled = current["enabled"] if enabled is None else int(enabled)
+        new_min_cents = current.get("min_drop_cents") if min_drop_cents is UNSET else min_drop_cents
+        new_min_pct = current.get("min_drop_percent") if min_drop_percent is UNSET else min_drop_percent
+        new_email_id = (
+            current.get("notification_email_id")
+            if notification_email_id is UNSET
+            else notification_email_id
+        )
+        new_email = current["email"] if email is UNSET else email
         now = utc_now_iso()
         with self.db._lock, self.db.connect() as conn:
             conn.execute(
                 """
                 UPDATE watches
-                SET target_price_cents = ?, notify_on_any_drop = ?, enabled = ?, updated_at = ?
+                SET target_price_cents = ?, notify_on_any_drop = ?, enabled = ?,
+                    min_drop_cents = ?, min_drop_percent = ?, notification_email_id = ?,
+                    email = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (new_target, new_drop, new_enabled, now, watch_id),
+                (
+                    new_target,
+                    new_drop,
+                    new_enabled,
+                    new_min_cents,
+                    new_min_pct,
+                    new_email_id,
+                    new_email,
+                    now,
+                    watch_id,
+                ),
             )
             return row_to_dict(conn.execute("SELECT * FROM watches WHERE id = ?", (watch_id,)).fetchone())
 
@@ -971,7 +1000,7 @@ class Repository:
                     SELECT n.*, g.name AS game_name
                     FROM notifications n
                     LEFT JOIN games g ON g.id = n.game_id
-                    WHERE n.user_id = ?
+                    WHERE n.user_id = ? AND COALESCE(n.reason, '') != 'system'
                     ORDER BY n.created_at DESC, n.id DESC
                     LIMIT ?
                     """,

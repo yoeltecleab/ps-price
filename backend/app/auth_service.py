@@ -57,6 +57,7 @@ from backend.app.jwt_tokens import (
 from backend.app.notifier import EmailNotifier
 from backend.app.passwords import hash_password, verify_password
 from backend.app.repository import Repository
+from backend.app.webauthn_config import effective_origins, effective_rp_id
 
 
 logger = logging.getLogger(__name__)
@@ -150,6 +151,7 @@ class AuthService:
             "display_name": user.get("display_name"),
             "email_verified": bool(user.get("email_verified_at")),
             "has_password": bool(user.get("password_hash")),
+            "preferred_theme_id": user.get("preferred_theme_id"),
             "created_at": user["created_at"],
         }
 
@@ -180,28 +182,90 @@ class AuthService:
     async def register(
         self,
         email: str,
-        password: str,
+        password: str | None,
         *,
         display_name: str | None = None,
         user_agent: str | None = None,
         ip_address: str | None = None,
     ) -> tuple[dict, str, str]:
-        """Create account, send verification email, and issue JWT cookies.
-
-        Returns:
-            ``(public_user_dict, access_token, refresh_token)``.
-        """
+        """Create account with optional password (passkey-only accounts use password=None)."""
         normalized = self._validate_email(email)
-        self._validate_password(password)
         if self.auth_repo.get_user_by_email(normalized):
             raise AuthError("unable to create account with these details")
+        if password is None:
+            raise AuthError("use passkey sign-up or provide a password")
+        self._validate_password(password)
+        password_hash = hash_password(password)
         user = self.auth_repo.create_user(
             normalized,
-            hash_password(password),
+            password_hash,
             display_name=display_name,
             email_verified=False,
         )
         await self._send_account_verification(user)
+        access, refresh = self._issue_tokens(
+            user,
+            user_agent=user_agent,
+            ip_address=ip_address,
+        )
+        return self._user_public(user), access, refresh
+
+    async def register_passkey_start(
+        self,
+        email: str,
+        *,
+        display_name: str | None = None,
+        request_origin: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a passwordless account and return WebAuthn registration options."""
+        normalized = self._validate_email(email)
+        if self.auth_repo.get_user_by_email(normalized):
+            raise AuthError("unable to create account with these details")
+        user = self.auth_repo.create_user(
+            normalized,
+            None,
+            display_name=display_name,
+            email_verified=False,
+        )
+        await self._send_account_verification(user)
+        session_user = {
+            "id": user["id"],
+            "email": user["email"],
+            "display_name": user.get("display_name") or display_name,
+        }
+        return self.passkey_registration_options(session_user, request_origin=request_origin)
+
+    async def register_passkey_finish(
+        self,
+        credential: dict[str, Any],
+        *,
+        user_agent: str | None = None,
+        ip_address: str | None = None,
+        request_origin: str | None = None,
+    ) -> tuple[dict, str, str]:
+        """Complete passwordless signup after the browser creates a passkey."""
+        client_data_b64 = credential.get("response", {}).get("clientDataJSON")
+        if not client_data_b64:
+            raise AuthError("invalid passkey response")
+        client_payload = json.loads(base64url_to_bytes(client_data_b64).decode("utf-8"))
+        challenge = client_payload.get("challenge")
+        stored = self.auth_repo.peek_webauthn_challenge(challenge, "register")
+        if not stored or not stored.get("user_id"):
+            raise AuthError("passkey challenge expired")
+        user = self.auth_repo.get_user_by_id(stored["user_id"])
+        if not user:
+            raise AuthError("user not found")
+        session_user = {
+            "id": user["id"],
+            "email": user["email"],
+            "display_name": user.get("display_name"),
+        }
+        self.verify_passkey_registration(
+            session_user,
+            credential,
+            "Passkey",
+            request_origin=request_origin,
+        )
         access, refresh = self._issue_tokens(
             user,
             user_agent=user_agent,
@@ -334,14 +398,22 @@ class AuthService:
             return
         token = self.auth_repo.create_password_reset_token(user["id"])
         link = f"{self.settings.frontend_url.rstrip('/')}/auth/reset-password?token={token}"
+        theme = user.get("preferred_theme_id") or "abyss"
+        from backend.app.email_templates import system_email_html
+
         await self.notifier.send_system_email(
             normalized,
-            "Reset your PS Price password",
-            f"Click to reset your password (expires in 2 hours):\n\n{link}",
-            html_body=(
-                f'<p>Click to reset your password (expires in 2 hours):</p>'
-                f'<p><a href="{link}">Reset password</a></p>'
+            "Reset your PS Prices password",
+            f"Reset your PS Prices password (expires in 2 hours):\n\n{link}",
+            html_body=system_email_html(
+                theme_id=theme,
+                title="Reset your password",
+                message="We received a request to reset your password. If you did not ask for this, you can ignore this email.",
+                cta_label="Reset password",
+                cta_href=link,
             ),
+            user_id=user["id"],
+            theme_id=theme,
         )
 
     def reset_password(self, token: str, new_password: str) -> None:
@@ -377,9 +449,33 @@ class AuthService:
         self.auth_repo.bump_token_version(user_id)
         self.auth_repo.delete_user_sessions(user_id)
 
-    def update_profile(self, user_id: int, display_name: str | None) -> dict:
-        """Update display name and return public user dict."""
-        user = self.auth_repo.update_user_profile(user_id, display_name=display_name)
+    def set_password(self, user_id: int, new_password: str) -> None:
+        """Set an initial password for passkey-only accounts."""
+        user = self.auth_repo.get_user_by_id(user_id)
+        if not user:
+            raise AuthError("user not found")
+        if user.get("password_hash"):
+            raise AuthError("password already set — use change password")
+        self._validate_password(new_password)
+        self.auth_repo.update_user_password(user_id, hash_password(new_password))
+
+    def update_profile(
+        self,
+        user_id: int,
+        *,
+        display_name: str | None = None,
+        preferred_theme_id: str | None = None,
+        update_display_name: bool = False,
+        update_theme: bool = False,
+    ) -> dict:
+        """Update display name and/or preferred UI/email theme."""
+        user = self.auth_repo.update_user_profile(
+            user_id,
+            display_name=display_name,
+            preferred_theme_id=preferred_theme_id,
+            update_display_name=update_display_name,
+            update_theme=update_theme,
+        )
         if not user:
             raise AuthError("user not found")
         return self._user_public(user)
@@ -508,7 +604,9 @@ class AuthService:
     # Passkeys (WebAuthn) — passwordless login
     # -------------------------------------------------------------------------
 
-    def passkey_registration_options(self, user: dict) -> dict[str, Any]:
+    def passkey_registration_options(
+        self, user: dict, *, request_origin: str | None = None
+    ) -> dict[str, Any]:
         """Step 1 of adding a passkey: return options for ``navigator.credentials.create``.
 
         Excludes credential ids already registered so the same passkey is not added twice.
@@ -527,8 +625,9 @@ class AuthService:
                 (user["id"],),
             ).fetchall()
         exclude = [PublicKeyCredentialDescriptor(id=row["credential_id"]) for row in rows]
+        rp_id = effective_rp_id(self.settings)
         options = generate_registration_options(
-            rp_id=self.settings.webauthn_rp_id,
+            rp_id=rp_id,
             rp_name=self.settings.webauthn_rp_name,
             user_id=str(user["id"]).encode(),
             user_name=user["email"],
@@ -547,7 +646,12 @@ class AuthService:
         return self._serialize_registration_options(options)
 
     def verify_passkey_registration(
-        self, user: dict, credential: dict[str, Any], friendly_name: str | None
+        self,
+        user: dict,
+        credential: dict[str, Any],
+        friendly_name: str | None,
+        *,
+        request_origin: str | None = None,
     ) -> dict:
         """Step 2 of registration: verify browser response and save public key.
 
@@ -574,8 +678,8 @@ class AuthService:
         verification = verify_registration_response(
             credential=credential,
             expected_challenge=base64url_to_bytes(challenge),
-            expected_rp_id=self.settings.webauthn_rp_id,
-            expected_origin=self.settings.webauthn_origin_list or [self.settings.webauthn_origin],
+            expected_rp_id=effective_rp_id(self.settings),
+            expected_origin=effective_origins(self.settings, request_origin),
             require_user_verification=True,
         )
         row = self.auth_repo.create_passkey(
@@ -592,7 +696,9 @@ class AuthService:
             "created_at": row["created_at"],
         }
 
-    def passkey_login_options(self, email: str | None = None) -> dict[str, Any]:
+    def passkey_login_options(
+        self, email: str | None = None, *, request_origin: str | None = None
+    ) -> dict[str, Any]:
         """Step 1 of passkey login: authentication options for ``navigator.credentials.get``.
 
         If email is provided and found, ``allowCredentials`` limits to that user's passkeys.
@@ -610,7 +716,7 @@ class AuthService:
                 user_id = user["id"]
                 allow_credentials = self._credential_descriptors(user_id)
         options = generate_authentication_options(
-            rp_id=self.settings.webauthn_rp_id,
+            rp_id=effective_rp_id(self.settings),
             allow_credentials=allow_credentials,
             user_verification=UserVerificationRequirement.REQUIRED,
         )
@@ -627,6 +733,7 @@ class AuthService:
         *,
         user_agent: str | None = None,
         ip_address: str | None = None,
+        request_origin: str | None = None,
     ) -> tuple[dict, str, str]:
         """Step 2 of passkey login: verify signature and issue JWTs."""
         raw_id = credential.get("rawId") or credential.get("id")
@@ -647,8 +754,8 @@ class AuthService:
         verification = verify_authentication_response(
             credential=credential,
             expected_challenge=base64url_to_bytes(challenge),
-            expected_rp_id=self.settings.webauthn_rp_id,
-            expected_origin=self.settings.webauthn_origin_list or [self.settings.webauthn_origin],
+            expected_rp_id=effective_rp_id(self.settings),
+            expected_origin=effective_origins(self.settings, request_origin),
             credential_public_key=stored_cred["public_key"],
             credential_current_sign_count=stored_cred["sign_count"],
             require_user_verification=True,
@@ -684,18 +791,41 @@ class AuthService:
 
     def _serialize_registration_options(self, options) -> dict[str, Any]:
         """Convert library WebAuthn options to JSON the browser understands (base64url)."""
-        payload = json.loads(options.model_dump_json())
-        payload["challenge"] = bytes_to_base64url(options.challenge)
-        if "user" in payload and "id" in payload["user"]:
-            payload["user"]["id"] = bytes_to_base64url(options.user.id)
+        rp_id = effective_rp_id(self.settings)
+        payload: dict[str, Any] = {
+            "challenge": bytes_to_base64url(options.challenge),
+            "timeout": options.timeout or 120000,
+            "rpId": rp_id,
+            "rp": {"name": options.rp.name, "id": rp_id},
+            "user": {
+                "id": bytes_to_base64url(options.user.id),
+                "name": options.user.name,
+                "displayName": options.user.display_name,
+            },
+            "pubKeyCredParams": [
+                {"type": "public-key", "alg": p.alg} for p in options.pub_key_cred_params
+            ],
+            "authenticatorSelection": {
+                "residentKey": options.authenticator_selection.resident_key.value,
+                "userVerification": options.authenticator_selection.user_verification.value,
+            },
+            "excludeCredentials": [
+                {
+                    "type": "public-key",
+                    "id": bytes_to_base64url(c.id),
+                    "transports": list(c.transports or []),
+                }
+                for c in (options.exclude_credentials or [])
+            ],
+        }
         return payload
 
     def _serialize_authentication_options(self, options) -> dict[str, Any]:
         """Convert authentication options to a minimal JSON dict for the frontend."""
         payload: dict[str, Any] = {
             "challenge": bytes_to_base64url(options.challenge),
-            "timeout": options.timeout,
-            "rpId": options.rp_id,
+            "timeout": options.timeout or 120000,
+            "rpId": effective_rp_id(self.settings),
             "userVerification": options.user_verification.value,
         }
         if options.allow_credentials:
@@ -715,20 +845,32 @@ class AuthService:
 
     async def _send_account_verification(self, user: dict) -> None:
         """Create verification token and email link to ``/auth/verify``."""
+        from backend.app.email_templates import system_email_html
+
         token = self.auth_repo.create_email_verification_token(user["id"])
         link = f"{self.settings.frontend_url.rstrip('/')}/auth/verify?token={token}"
+        theme = user.get("preferred_theme_id") or "abyss"
         await self.notifier.send_system_email(
             user["email"],
-            "Verify your PS Price account",
-            f"Welcome! Verify your email to unlock library and alerts:\n\n{link}",
-            html_body=(
-                f'<p>Welcome! Verify your email to unlock library and price alerts.</p>'
-                f'<p><a href="{link}">Verify email</a></p>'
+            "Verify your PS Prices account",
+            f"Welcome to PS Prices! Tap the button in this email to verify your account and unlock price alerts.\n\n{link}",
+            html_body=system_email_html(
+                theme_id=theme,
+                title="Verify your email",
+                message="Welcome to PS Prices. Confirm your email to track games, deploy price watches, and receive alerts in your chosen theme.",
+                cta_label="Verify email",
+                cta_href=link,
             ),
+            user_id=user["id"],
+            theme_id=theme,
         )
 
     async def _send_notification_email_verification(self, user_id: int, row: dict) -> None:
         """Create per-address token and email link to notification verify page."""
+        from backend.app.email_templates import system_email_html
+
+        user = self.auth_repo.get_user_by_id(user_id)
+        theme = (user or {}).get("preferred_theme_id") or "abyss"
         token = self.auth_repo.create_notification_email_verification_token(row["id"])
         link = (
             f"{self.settings.frontend_url.rstrip('/')}/account/emails/verify"
@@ -736,9 +878,17 @@ class AuthService:
         )
         await self.notifier.send_system_email(
             row["email"],
-            "Verify your PS Price notification email",
+            "Confirm your PS Prices alert email",
             f"Confirm this address for price alerts:\n\n{link}",
-            html_body=f'<p>Confirm this address for price alerts:</p><p><a href="{link}">Verify email</a></p>',
+            html_body=system_email_html(
+                theme_id=theme,
+                title="Confirm alert email",
+                message="Add this address to your PS Prices account to receive price-drop notifications.",
+                cta_label="Verify email",
+                cta_href=link,
+            ),
+            user_id=user_id,
+            theme_id=theme,
         )
 
     def require_verified_notification_email(

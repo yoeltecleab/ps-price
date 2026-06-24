@@ -155,22 +155,28 @@ class AuthRepository:
                 (password_hash, now, user_id),
             )
 
-    def update_user_profile(self, user_id: int, *, display_name: str | None) -> dict | None:
-        """Change display name and return the updated user row.
-
-        Args:
-            user_id: User to update.
-            display_name: New name, or ``None`` to clear it.
-
-        Returns:
-            Updated user dict, or ``None`` if the id does not exist.
-        """
+    def update_user_profile(
+        self,
+        user_id: int,
+        *,
+        display_name: str | None = None,
+        preferred_theme_id: str | None = None,
+        update_display_name: bool = False,
+        update_theme: bool = False,
+    ) -> dict | None:
+        """Change display name and/or preferred email theme."""
         now = utc_now_iso()
         with self.db._lock, self.db.connect() as conn:
-            conn.execute(
-                "UPDATE users SET display_name = ?, updated_at = ? WHERE id = ?",
-                (display_name, now, user_id),
-            )
+            if update_display_name:
+                conn.execute(
+                    "UPDATE users SET display_name = ?, updated_at = ? WHERE id = ?",
+                    (display_name, now, user_id),
+                )
+            if update_theme:
+                conn.execute(
+                    "UPDATE users SET preferred_theme_id = ?, updated_at = ? WHERE id = ?",
+                    (preferred_theme_id, now, user_id),
+                )
             return row_to_dict(conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone())
 
     def mark_email_verified(self, user_id: int) -> None:
@@ -620,6 +626,18 @@ class AuthRepository:
                 return None
             conn.execute("DELETE FROM webauthn_challenges WHERE id = ?", (row["id"],))
             return dict(row)
+
+    def peek_webauthn_challenge(self, challenge: str, purpose: str) -> dict | None:
+        """Return a challenge row without consuming it (signup finish needs user id first)."""
+        with self.db.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM webauthn_challenges
+                WHERE challenge = ? AND purpose = ? AND expires_at > ?
+                """,
+                (challenge, purpose, utc_now_iso()),
+            ).fetchone()
+            return dict(row) if row else None
 
     # -------------------------------------------------------------------------
     # Passkeys — WebAuthn credentials in ``passkey_credentials``

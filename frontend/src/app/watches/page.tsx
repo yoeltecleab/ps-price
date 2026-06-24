@@ -2,21 +2,38 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { Bell, Mail, Trash2 } from "lucide-react";
+import { Bell, Mail, Pencil, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import type { Game, Watch } from "@/lib/types";
 import { centsToDisplay, formatRelativeTime } from "@/lib/format";
 import { EmptyState } from "@/components/EmptyState";
 import { Button } from "@/components/Button";
 import { Badge } from "@/components/Badge";
 import { Skeleton } from "@/components/Skeleton";
+import { WatchEditModal } from "@/components/WatchEditModal";
+
+function ruleSummary(watch: Watch) {
+  const parts: string[] = [];
+  if (watch.target_price_cents) {
+    parts.push(`Target ${centsToDisplay(watch.target_price_cents)}`);
+  }
+  if (watch.notify_on_any_drop) parts.push("Any drop");
+  if (watch.min_drop_cents) {
+    parts.push(`Min ${centsToDisplay(watch.min_drop_cents)} drop`);
+  }
+  if (watch.min_drop_percent) parts.push(`Min ${watch.min_drop_percent}% drop`);
+  return parts.length ? parts : ["Default rules"];
+}
 
 export default function WatchesPage() {
+  const { notificationEmails, refresh } = useAuth();
   const [watches, setWatches] = useState<Watch[]>([]);
   const [games, setGames] = useState<Map<number, Game>>(new Map());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [testingId, setTestingId] = useState<number | null>(null);
+  const [editing, setEditing] = useState<Watch | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -123,14 +140,11 @@ export default function WatchesPage() {
                     </Link>
                     <p className="mt-1 text-xs text-muted">{watch.email}</p>
                     <div className="mt-2 flex flex-wrap gap-2">
-                      {watch.target_price_cents ? (
-                        <Badge variant="accent">
-                          Target {centsToDisplay(watch.target_price_cents)}
+                      {ruleSummary(watch).map((label) => (
+                        <Badge key={label} variant={label.startsWith("Target") ? "accent" : "default"}>
+                          {label}
                         </Badge>
-                      ) : null}
-                      {watch.notify_on_any_drop ? (
-                        <Badge>Any drop</Badge>
-                      ) : null}
+                      ))}
                       <Badge variant={watch.enabled ? "success" : "default"}>
                         {watch.enabled ? "Active" : "Paused"}
                       </Badge>
@@ -141,7 +155,15 @@ export default function WatchesPage() {
                       </p>
                     ) : null}
                   </div>
-                  <div className="flex gap-2 shrink-0">
+                  <div className="flex gap-2 shrink-0 flex-wrap">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => setEditing(watch)}
+                    >
+                      <Pencil className="size-3.5" aria-hidden />
+                      Edit
+                    </Button>
                     <Button
                       variant="secondary"
                       size="sm"
@@ -173,6 +195,18 @@ export default function WatchesPage() {
           })}
         </ul>
       )}
+
+      {editing ? (
+        <WatchEditModal
+          watch={editing}
+          notificationEmails={notificationEmails}
+          onClose={() => setEditing(null)}
+          onSaved={(updated) =>
+            setWatches((prev) => prev.map((w) => (w.id === updated.id ? updated : w)))
+          }
+          onEmailsUpdated={refresh}
+        />
+      ) : null}
     </div>
   );
 }

@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
 import { BookmarkSimple, Bell } from "@phosphor-icons/react";
-import Link from "next/link";
+import { useState } from "react";
 import type { NotificationEmail } from "@/lib/types";
+import { AlertEmailSelect } from "./AlertEmailSelect";
 import { Button } from "./Button";
 
 export function BulkActionBar({
@@ -15,6 +15,7 @@ export function BulkActionBar({
   showLibrary = true,
   showWatch = true,
   notificationEmails = [],
+  onEmailsUpdated,
 }: {
   count: number;
   onAddToLibrary?: () => void;
@@ -24,6 +25,7 @@ export function BulkActionBar({
   showLibrary?: boolean;
   showWatch?: boolean;
   notificationEmails?: NotificationEmail[];
+  onEmailsUpdated?: () => void | Promise<void>;
 }) {
   const verified = notificationEmails.filter((e) => e.verified);
   const [emailId, setEmailId] = useState<number | "">(
@@ -39,32 +41,12 @@ export function BulkActionBar({
       </p>
       {showWatch ? (
         <div className="flex-1 min-w-0">
-          {verified.length ? (
-            <label className="block">
-              <span className="font-data text-xs uppercase tracking-wider text-muted mb-2 block">
-                Alert email
-              </span>
-              <select
-                value={emailId}
-                onChange={(e) => setEmailId(Number(e.target.value))}
-                className="h-10 w-full rounded-[var(--radius-sm)] holo-panel px-3 font-data text-sm text-ink"
-              >
-                {verified.map((row) => (
-                  <option key={row.id} value={row.id}>
-                    {row.label ? `${row.label} · ` : ""}
-                    {row.email}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : (
-            <p className="text-sm text-muted">
-              <Link href="/account" className="text-accent hover:underline">
-                Add a verified notification email
-              </Link>{" "}
-              to deploy watches.
-            </p>
-          )}
+          <AlertEmailSelect
+            emails={notificationEmails}
+            value={emailId}
+            onChange={setEmailId}
+            onEmailsUpdated={onEmailsUpdated}
+          />
         </div>
       ) : null}
       <div className="flex flex-wrap gap-2 shrink-0">

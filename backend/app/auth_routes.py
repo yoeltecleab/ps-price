@@ -51,11 +51,24 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 class RegisterBody(BaseModel):
-    """POST /register — new account."""
+    """POST /register — new account (password optional when using passkey signup)."""
 
     email: str
-    password: str = Field(min_length=10)
+    password: str | None = Field(default=None, min_length=10)
     display_name: str | None = None
+
+
+class RegisterPasskeyStartBody(BaseModel):
+    """POST /register/passkey/options — passwordless signup step 1."""
+
+    email: str
+    display_name: str | None = None
+
+
+class SetPasswordBody(BaseModel):
+    """POST /set-password — initial password for passkey-only accounts."""
+
+    new_password: str = Field(min_length=10)
 
 
 class LoginBody(BaseModel):
@@ -92,9 +105,10 @@ class ChangePasswordBody(BaseModel):
 
 
 class ProfilePatchBody(BaseModel):
-    """PATCH /profile — optional display name update."""
+    """PATCH /profile — display name and/or preferred UI theme."""
 
     display_name: str | None = None
+    preferred_theme_id: str | None = None
 
 
 class PasskeyVerifyBody(BaseModel):
@@ -219,7 +233,50 @@ async def register(
     return {"user": user}
 
 
-@router.post("/login")
+@router.post("/register/passkey/options")
+async def register_passkey_options(
+    body: RegisterPasskeyStartBody,
+    request: Request,
+    auth: AuthServiceDep,
+):
+    """Create a passwordless account and return WebAuthn registration options."""
+    rate_limiter.check(
+        f"register:{rate_limiter.client_ip(request)}",
+        limit=5,
+        window_seconds=3600,
+    )
+    try:
+        return await auth.register_passkey_start(
+            body.email,
+            display_name=body.display_name,
+            request_origin=request.headers.get("origin"),
+        )
+    except AuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/register/passkey/verify", status_code=status.HTTP_201_CREATED)
+async def register_passkey_verify(
+    body: PasskeyVerifyBody,
+    request: Request,
+    response: Response,
+    auth: AuthServiceDep,
+    settings: SettingsDep,
+):
+    """Finish passwordless signup and set auth cookies."""
+    try:
+        user, access, refresh = await auth.register_passkey_finish(
+            body.credential,
+            user_agent=request.headers.get("user-agent"),
+            ip_address=request.client.host if request.client else None,
+            request_origin=request.headers.get("origin"),
+        )
+    except AuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _set_auth_cookies(response, settings, access, refresh)
+    return {"user": user}
+
+
 async def login(
     body: LoginBody,
     request: Request,
@@ -349,12 +406,28 @@ def reset_password(body: ResetPasswordBody, auth: AuthServiceDep):
 
 @router.patch("/profile")
 def update_profile(body: ProfilePatchBody, user: CurrentUserDep, auth: AuthServiceDep):
-    """Update display name for the logged-in user."""
+    """Update display name and/or preferred theme for the logged-in user."""
     try:
-        updated = auth.update_profile(user["id"], body.display_name)
+        updated = auth.update_profile(
+            user["id"],
+            display_name=body.display_name,
+            preferred_theme_id=body.preferred_theme_id,
+            update_display_name=body.display_name is not None,
+            update_theme=body.preferred_theme_id is not None,
+        )
     except AuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"user": updated}
+
+
+@router.post("/set-password")
+def set_password(body: SetPasswordBody, user: CurrentUserDep, auth: AuthServiceDep):
+    """Set an initial password for passkey-only accounts."""
+    try:
+        auth.set_password(user["id"], body.new_password)
+    except AuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
 
 
 @router.post("/change-password")
@@ -464,27 +537,43 @@ def delete_notification_email(email_id: int, user: CurrentUserDep, auth: AuthSer
 
 
 @router.post("/passkey/register/options")
-def passkey_register_options(user: CurrentUserDep, auth: AuthServiceDep):
+def passkey_register_options(
+    request: Request, user: CurrentUserDep, auth: AuthServiceDep
+):
     """Return registration challenge (logged in). Frontend calls credentials.create()."""
-    return auth.passkey_registration_options(user)
+    return auth.passkey_registration_options(
+        user, request_origin=request.headers.get("origin")
+    )
 
 
 @router.post("/passkey/register/verify", status_code=status.HTTP_201_CREATED)
 def passkey_register_verify(
-    body: PasskeyVerifyBody, user: CurrentUserDep, auth: AuthServiceDep
+    body: PasskeyVerifyBody,
+    request: Request,
+    user: CurrentUserDep,
+    auth: AuthServiceDep,
 ):
     """Save new passkey after browser completes registration."""
     try:
-        return auth.verify_passkey_registration(user, body.credential, body.friendly_name)
+        return auth.verify_passkey_registration(
+            user,
+            body.credential,
+            body.friendly_name,
+            request_origin=request.headers.get("origin"),
+        )
     except AuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/passkey/login/options")
-def passkey_login_options(body: PasskeyLoginOptionsBody, auth: AuthServiceDep):
+def passkey_login_options(
+    body: PasskeyLoginOptionsBody, request: Request, auth: AuthServiceDep
+):
     """Return authentication challenge. Optional email limits which passkeys appear."""
     try:
-        return auth.passkey_login_options(body.email)
+        return auth.passkey_login_options(
+            body.email, request_origin=request.headers.get("origin")
+        )
     except AuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -503,6 +592,7 @@ def passkey_login_verify(
             body.credential,
             user_agent=request.headers.get("user-agent"),
             ip_address=request.client.host if request.client else None,
+            request_origin=request.headers.get("origin"),
         )
     except AuthError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc

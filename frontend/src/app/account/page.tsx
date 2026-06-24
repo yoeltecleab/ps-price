@@ -4,17 +4,12 @@ import Link from "next/link";
 import { useState } from "react";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import {
+  buildRegistrationOptions,
+  credentialToJson,
+} from "@/lib/webauthn";
 import { Button } from "@/components/Button";
 import { Input } from "@/components/Input";
-
-function bufferToBase64url(buffer: ArrayBuffer) {
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  bytes.forEach((b) => {
-    binary += String.fromCharCode(b);
-  });
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
 
 export default function AccountPage() {
   const { user, notificationEmails, refresh, signOut } = useAuth();
@@ -22,6 +17,7 @@ export default function AccountPage() {
   const [label, setLabel] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
+  const [setPasswordValue, setSetPasswordValue] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -89,48 +85,41 @@ export default function AccountPage() {
     }
   }
 
+  async function setPassword(e: React.FormEvent) {
+    e.preventDefault();
+    setLoading(true);
+    setMessage(null);
+    try {
+      await api("/api/auth/set-password", {
+        method: "POST",
+        body: JSON.stringify({ new_password: setPasswordValue }),
+      });
+      setSetPasswordValue("");
+      setMessage("Password set. You can now sign in with email and password.");
+      await refresh();
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Failed to set password");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function addPasskey() {
     setLoading(true);
+    setMessage(null);
     try {
       const options = await api<Record<string, unknown>>("/api/auth/passkey/register/options", {
         method: "POST",
       });
-      const credential = (await navigator.credentials.create({
-        publicKey: {
-          challenge: Uint8Array.from(
-            atob((options.challenge as string).replace(/-/g, "+").replace(/_/g, "/")),
-            (c) => c.charCodeAt(0),
-          ),
-          rp: options.rp as PublicKeyCredentialRpEntity,
-          user: {
-            ...(options.user as PublicKeyCredentialUserEntity),
-            id: Uint8Array.from(
-              atob(
-                ((options.user as { id: string }).id).replace(/-/g, "+").replace(/_/g, "/"),
-              ),
-              (c) => c.charCodeAt(0),
-            ),
-          },
-          pubKeyCredParams: options.pubKeyCredParams as PublicKeyCredentialParameters[],
-          timeout: (options.timeout as number) || 60000,
-          excludeCredentials: [],
-        },
-      })) as PublicKeyCredential | null;
+      const credential = (await navigator.credentials.create(
+        buildRegistrationOptions(options),
+      )) as PublicKeyCredential | null;
       if (!credential) return;
-      const response = credential.response as AuthenticatorAttestationResponse;
       await api("/api/auth/passkey/register/verify", {
         method: "POST",
         body: JSON.stringify({
           friendly_name: "Passkey",
-          credential: {
-            id: credential.id,
-            rawId: bufferToBase64url(credential.rawId),
-            type: credential.type,
-            response: {
-              clientDataJSON: bufferToBase64url(response.clientDataJSON),
-              attestationObject: bufferToBase64url(response.attestationObject),
-            },
-          },
+          credential: credentialToJson(credential),
         }),
       });
       setMessage("Passkey registered.");
@@ -231,7 +220,27 @@ export default function AccountPage() {
             </div>
           </form>
         </section>
-      ) : null}
+      ) : (
+        <section className="holo-panel rounded-[var(--radius-xl)] p-6 space-y-4">
+          <h2 className="font-data text-xs uppercase tracking-widest text-accent">Password</h2>
+          <p className="text-sm text-muted">
+            Your account uses passkey sign-in. Add a password if you also want to sign in with email and password.
+          </p>
+          <form onSubmit={setPassword} className="max-w-sm space-y-3">
+            <Input
+              label="New password"
+              type="password"
+              value={setPasswordValue}
+              onChange={(e) => setSetPasswordValue(e.target.value)}
+              required
+              placeholder="At least 10 characters"
+            />
+            <Button type="submit" loading={loading} variant="secondary">
+              Set password
+            </Button>
+          </form>
+        </section>
+      )}
 
       <section className="holo-panel rounded-[var(--radius-xl)] p-6 space-y-4">
         <h2 className="font-data text-xs uppercase tracking-widest text-accent">Passkeys</h2>

@@ -18,8 +18,9 @@ import { api } from "@/lib/api";
 import type { GameDetail, Watch } from "@/lib/types";
 import { formatDateTime, parseDollarsToCents } from "@/lib/format";
 import { PriceChart } from "@/components/PriceChart";
+import { AlertEmailSelect } from "@/components/AlertEmailSelect";
+import { WatchAlertFields } from "@/components/WatchAlertFields";
 import { Button } from "@/components/Button";
-import { Input } from "@/components/Input";
 import { GameCardSkeleton } from "@/components/Skeleton";
 import { ConfettiBurst } from "@/components/ConfettiBurst";
 import { useTheme } from "@/components/ThemeProvider";
@@ -31,7 +32,7 @@ export default function GameDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { theme } = useTheme();
-  const { requireVerified } = useAuth();
+  const { requireVerified, notificationEmails, refresh } = useAuth();
   const verifiedEmails = useVerifiedEmails();
   const { id: idStr } = use(params);
   const gameId = Number(idStr);
@@ -43,6 +44,8 @@ export default function GameDetailPage({
   const [notificationEmailId, setNotificationEmailId] = useState<number | "">("");
   const [targetPrice, setTargetPrice] = useState("");
   const [notifyAnyDrop, setNotifyAnyDrop] = useState(true);
+  const [minDropDollars, setMinDropDollars] = useState("");
+  const [minDropPercent, setMinDropPercent] = useState("");
   const [creatingWatch, setCreatingWatch] = useState(false);
   const [watchSuccess, setWatchSuccess] = useState(false);
   const [confetti, setConfetti] = useState(false);
@@ -113,6 +116,8 @@ export default function GameDetailPage({
           notification_email_id: notificationEmailId,
           target_price_cents: cents,
           notify_on_any_drop: notifyAnyDrop,
+          min_drop_cents: parseDollarsToCents(minDropDollars),
+          min_drop_percent: minDropPercent ? Number(minDropPercent) : null,
           enabled: true,
           theme_id: theme,
         }),
@@ -330,51 +335,31 @@ export default function GameDetailPage({
             </p>
 
             <form onSubmit={handleCreateWatch} className="mt-6 flex flex-col gap-4">
-              {verifiedEmails.length ? (
-                <label className="block">
-                  <span className="font-data text-xs uppercase tracking-wider text-muted mb-2 block">
-                    Notification email
-                  </span>
-                  <select
-                    value={notificationEmailId}
-                    onChange={(e) => setNotificationEmailId(Number(e.target.value))}
-                    className="h-10 w-full rounded-[var(--radius-sm)] holo-panel px-3 font-data text-sm text-ink"
-                    required
-                  >
-                    {verifiedEmails.map((row) => (
-                      <option key={row.id} value={row.id}>
-                        {row.label ? `${row.label} · ` : ""}
-                        {row.email}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              ) : (
-                <p className="text-sm text-muted">
-                  <Link href="/account" className="text-accent hover:underline">
-                    Add a verified notification email
-                  </Link>{" "}
-                  to deploy watches.
-                </p>
-              )}
-              <Input
-                label="Target price (optional)"
-                type="text"
-                placeholder="29.99"
-                hint="Leave empty to alert on any drop"
-                value={targetPrice}
-                onChange={(e) => setTargetPrice(e.target.value)}
+              <AlertEmailSelect
+                emails={notificationEmails}
+                value={notificationEmailId}
+                onChange={setNotificationEmailId}
+                onEmailsUpdated={refresh}
               />
-              <label className="flex items-center gap-2.5 font-data text-xs text-muted cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={notifyAnyDrop}
-                  onChange={(e) => setNotifyAnyDrop(e.target.checked)}
-                  className="size-4 rounded border-border accent-primary"
+              {verifiedEmails.length ? (
+                <WatchAlertFields
+                  targetPrice={targetPrice}
+                  onTargetPriceChange={setTargetPrice}
+                  notifyAnyDrop={notifyAnyDrop}
+                  onNotifyAnyDropChange={setNotifyAnyDrop}
+                  minDropDollars={minDropDollars}
+                  onMinDropDollarsChange={setMinDropDollars}
+                  minDropPercent={minDropPercent}
+                  onMinDropPercentChange={setMinDropPercent}
                 />
-                Notify on any price drop
-              </label>
-              <Button type="submit" loading={creatingWatch} className="w-full" size="lg">
+              ) : null}
+              <Button
+                type="submit"
+                loading={creatingWatch}
+                className="w-full"
+                size="lg"
+                disabled={!notificationEmailId}
+              >
                 Deploy watch
               </Button>
               {watchSuccess ? (

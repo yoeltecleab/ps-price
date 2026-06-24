@@ -14,7 +14,7 @@ import { useAuth } from "@/lib/auth";
 
 export default function LibraryPage() {
   const { theme } = useTheme();
-  const { requireVerified, notificationEmails } = useAuth();
+  const { requireVerified, notificationEmails, refresh } = useAuth();
   const [games, setGames] = useState<Game[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -155,6 +155,7 @@ export default function LibraryPage() {
             onDeployWatch={handleBulkWatch}
             watchLoading={bulkWatchLoading}
             notificationEmails={notificationEmails}
+            onEmailsUpdated={refresh}
           />
         </>
       )}

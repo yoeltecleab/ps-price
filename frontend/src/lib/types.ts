@@ -99,6 +99,9 @@ export interface Watch {
   notify_on_any_drop: number;
   enabled: number;
   theme_id?: string | null;
+  min_drop_cents: number | null;
+  min_drop_percent: number | null;
+  notification_email_id: number | null;
   last_notified_price_cents: number | null;
   last_notified_at: string | null;
   created_at: string;
@@ -141,6 +144,31 @@ export interface DealFilters {
   sort: DealSort;
   sortDir: SortDirection;
   onSaleOnly: boolean;
+}
+
+export interface AuthUser {
+  id: number;
+  email: string;
+  display_name: string | null;
+  email_verified: boolean;
+  has_password: boolean;
+  is_admin: boolean;
+  preferred_theme_id?: string | null;
+}
+
+export interface NotificationEmail {
+  id: number;
+  email: string;
+  label: string | null;
+  verified: boolean;
+  is_primary: boolean;
+  created_at: string;
+}
+
+export interface MeResponse {
+  user: AuthUser;
+  notification_emails: NotificationEmail[];
+  passkeys: { id: number; friendly_name: string | null; created_at: string }[];
 }
 
 export interface AuthUser {

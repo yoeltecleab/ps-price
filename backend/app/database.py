@@ -202,6 +202,7 @@ class Database:
                 display_name TEXT,
                 email_verified_at TEXT,
                 token_version INTEGER NOT NULL DEFAULT 0,
+                preferred_theme_id TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -295,6 +296,8 @@ class Database:
             conn.execute(
                 "ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0"
             )
+        if "preferred_theme_id" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN preferred_theme_id TEXT")
 
     def _migrate_games_columns(self, conn: sqlite3.Connection) -> None:
         """Add catalog/deals columns to games when upgrading existing databases.
@@ -348,6 +351,10 @@ class Database:
         existing = {row[1] for row in conn.execute("PRAGMA table_info(watches)")}
         if "theme_id" not in existing:
             conn.execute("ALTER TABLE watches ADD COLUMN theme_id TEXT")
+        if "min_drop_cents" not in existing:
+            conn.execute("ALTER TABLE watches ADD COLUMN min_drop_cents INTEGER")
+        if "min_drop_percent" not in existing:
+            conn.execute("ALTER TABLE watches ADD COLUMN min_drop_percent INTEGER")
 
 
 def row_to_dict(row: sqlite3.Row | None) -> dict | None:

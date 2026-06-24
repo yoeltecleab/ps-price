@@ -78,6 +78,7 @@ class Settings(BaseSettings):
     smtp_use_ssl: bool = False
     smtp_timeout_seconds: float = 15.0
     notification_from_email: str = "ps-price@example.com"
+    notification_from_name: str = "PS Prices"
 
     # --- Catalog / deals sync tuning ---
     max_search_limit: int = Field(default=24, ge=1, le=48)

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inconsolata, JetBrains_Mono } from "next/font/google";
 import { AppShell } from "@/components/AppShell";
 import { ThemeProvider } from "@/components/ThemeProvider";
+import { ThemeSync } from "@/components/ThemeSync";
 import { AuthProvider } from "@/lib/auth";
 import "./globals.css";
 
@@ -40,6 +41,7 @@ export default function RootLayout({
       <body className="min-h-dvh antialiased">
         <ThemeProvider>
           <AuthProvider>
+            <ThemeSync />
             <AppShell>{children}</AppShell>
           </AuthProvider>
         </ThemeProvider>

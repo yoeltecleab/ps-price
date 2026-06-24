@@ -156,6 +156,8 @@ class WatchCreate(BaseModel):
     notify_on_any_drop: bool = True
     enabled: bool = True
     theme_id: str | None = None
+    min_drop_cents: int | None = Field(default=None, ge=0)
+    min_drop_percent: int | None = Field(default=None, ge=1, le=100)
 
 
 class BulkTrackRequest(BaseModel):
@@ -171,6 +173,8 @@ class BulkWatchCreate(BaseModel):
     notify_on_any_drop: bool = True
     enabled: bool = True
     theme_id: str | None = None
+    min_drop_cents: int | None = Field(default=None, ge=0)
+    min_drop_percent: int | None = Field(default=None, ge=1, le=100)
 
 
 class BulkDeleteNotifications(BaseModel):
@@ -186,6 +190,9 @@ class WatchPatch(BaseModel):
     target_price_cents: int | None = Field(default=None, ge=0)
     notify_on_any_drop: bool | None = None
     enabled: bool | None = None
+    min_drop_cents: int | None = Field(default=None, ge=0)
+    min_drop_percent: int | None = Field(default=None, ge=1, le=100)
+    notification_email_id: int | None = None
 
 
 class WatchOut(BaseModel):
@@ -201,6 +208,9 @@ class WatchOut(BaseModel):
     notify_on_any_drop: int
     enabled: int
     theme_id: str | None = None
+    min_drop_cents: int | None = None
+    min_drop_percent: int | None = None
+    notification_email_id: int | None = None
     last_notified_price_cents: int | None = None
     last_notified_at: str | None = None
     created_at: str

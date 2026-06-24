@@ -27,7 +27,7 @@ const defaultFilters: DealFilters = {
 
 export default function DealsHomePage() {
   const { theme } = useTheme();
-  const { requireVerified, notificationEmails, user } = useAuth();
+  const { requireVerified, notificationEmails, user, refresh } = useAuth();
   const [filters, setFilters] = useState<DealFilters>(defaultFilters);
   const [data, setData] = useState<DealsPage | null>(null);
   const [loading, setLoading] = useState(true);
@@ -402,6 +402,7 @@ export default function DealsHomePage() {
             libraryLoading={bulkLibraryLoading}
             watchLoading={bulkWatchLoading}
             notificationEmails={notificationEmails}
+            onEmailsUpdated={refresh}
           />
 
           {data && data.total > limit ? (
