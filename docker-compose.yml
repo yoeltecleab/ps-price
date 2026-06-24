@@ -18,7 +18,9 @@ services:
       start_period: 5s
     restart: unless-stopped
     networks:
-      - ps-price-network
+      ps-price-network:
+        aliases:
+          - psprice
 
   backend:
     build:

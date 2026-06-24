@@ -255,6 +255,8 @@ nano .env
 POSTGRES_USER=psprice
 POSTGRES_PASSWORD=replace-with-openssl-rand-base64-48
 POSTGRES_DB=psprice
+# Host must be the Docker service name "postgres" (not the database name "psprice").
+# URL-encode special characters in the password (+, /, =, @, etc.).
 PS_PRICE_DATABASE_URL=postgresql://psprice:replace-with-openssl-rand-base64-48@postgres:5432/psprice
 PS_PRICE_STORE_LOCALE=en-us
 
