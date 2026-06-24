@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     check_interval_minutes: int = 360  # re-check tracked game prices
     feed_sync_interval_minutes: int = 60  # re-download catalog/deals feeds
     scheduler_enabled: bool = True
+    sync_on_startup: bool = True  # pull catalog when the API process starts (deploy)
 
     # --- HTTP API security ---
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
@@ -81,7 +82,8 @@ class Settings(BaseSettings):
     notification_from_name: str = "PS Prices"
 
     # --- Catalog / deals sync tuning ---
-    max_search_limit: int = Field(default=24, ge=1, le=48)
+    max_search_limit: int = Field(default=48, ge=1, le=100)
+    catalog_refresh_cooldown_seconds: int = Field(default=60, ge=0, le=3600)
     deals_category_id: str = ALL_DEALS_CATEGORY_ID
     catalog_category_id: str = STORE_CATALOG_GRID_ID
     catalog_sync_shards: str = "all,PS5,PS4"  # comma-separated browse shards

@@ -11,6 +11,7 @@ import { BulkActionBar } from "@/components/BulkActionBar";
 import { Button } from "@/components/Button";
 import { useTheme } from "@/components/ThemeProvider";
 import { useAuth } from "@/lib/auth";
+import { refreshCatalogPrices } from "@/lib/catalogRefresh";
 
 export default function LibraryPage() {
   const { theme } = useTheme();
@@ -55,7 +56,8 @@ export default function LibraryPage() {
   async function handleRefreshAll() {
     setRefreshingAll(true);
     try {
-      await api("/api/refresh-due", { method: "POST" });
+      const result = await refreshCatalogPrices();
+      if (result.message) setError(null);
       await loadGames();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Refresh failed");

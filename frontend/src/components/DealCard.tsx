@@ -42,7 +42,7 @@ export const DealCard = memo(function DealCard({
         ease: [0.16, 1, 0.3, 1],
       }}
       className={[
-        "group relative flex flex-col holo-panel overflow-hidden rounded-[var(--radius-lg)]",
+        "group relative flex h-full flex-col holo-panel overflow-hidden rounded-[var(--radius-lg)]",
         selected ? "ring-2 ring-accent/50" : "",
       ].join(" ")}
     >
@@ -99,19 +99,19 @@ export const DealCard = memo(function DealCard({
         </div>
       </Link>
 
-      <div className="flex flex-col gap-2 p-4">
-        <Link
-          href={`/games/${game.id}`}
-          className="font-display font-semibold text-sm text-ink leading-snug line-clamp-2 hover:text-accent transition-colors"
-        >
-          {game.name}
-        </Link>
+      <div className="flex flex-1 flex-col gap-2 p-4">
+        <div className="min-h-[5.5rem] flex flex-col">
+          <Link
+            href={`/games/${game.id}`}
+            className="font-display font-semibold text-sm text-ink leading-snug line-clamp-2 min-h-[2.75rem] hover:text-accent transition-colors"
+          >
+            {game.name}
+          </Link>
 
-        {game.description_short ? (
-          <p className="text-xs text-muted line-clamp-2 leading-relaxed">
-            {game.description_short}
+          <p className="text-xs text-muted line-clamp-2 leading-relaxed mt-2 min-h-[2.5rem]">
+            {game.description_short || "\u00A0"}
           </p>
-        ) : null}
+        </div>
 
         <div className="flex items-baseline gap-2 mt-auto pt-1">
           <span className="font-data font-bold tabular-nums text-ink text-lg">

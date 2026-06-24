@@ -155,43 +155,61 @@ def parse_graphql_concept(
     *,
     popularity_rank: int | None = None,
 ) -> SearchResult | None:
-    """Convert a browse-grid Concept node into a SearchResult.
-
-    A **Concept** is the marketing wrapper (title, artwork).  It contains one
-    or more **Product** entries (Standard Edition, Deluxe, etc.).  We pick the
-    first product with a valid ``id`` and merge concept-level fields when the
-    product object is incomplete.
-    """
-    name = concept.get("name")
-    if not isinstance(name, str) or not name.strip():
-        return None
-
-    products = concept.get("products") or []
-    product: dict[str, Any] | None = None
-    product_id: str | None = None
-    for candidate in products:
-        if isinstance(candidate, dict) and isinstance(candidate.get("id"), str) and candidate["id"]:
-            product = candidate
-            product_id = candidate["id"]
-            break
-    if not product_id:
-        return None
-
-    merged = dict(product)
-    if not merged.get("media") and concept.get("media"):
-        merged["media"] = concept.get("media")
-    if not isinstance(merged.get("price"), dict) and isinstance(concept.get("price"), dict):
-        merged["price"] = concept.get("price")
-    if not merged.get("platforms") and concept.get("platforms"):
-        merged["platforms"] = concept.get("platforms")
-
-    return parse_graphql_product(
-        merged,
-        locale,
-        origin,
-        popularity_rank=popularity_rank,
-        name_override=name.strip(),
+    """Convert a browse-grid Concept node into a SearchResult (first product)."""
+    products = parse_graphql_concept_products(
+        concept, locale, origin, popularity_rank=popularity_rank
     )
+    return products[0] if products else None
+
+
+def parse_graphql_concept_products(
+    concept: dict[str, Any],
+    locale: str,
+    origin: str,
+    *,
+    popularity_rank: int | None = None,
+) -> list[SearchResult]:
+    """Emit every product SKU under a concept (Standard, Ultimate, etc.)."""
+    concept_name = concept.get("name")
+    if not isinstance(concept_name, str) or not concept_name.strip():
+        return []
+
+    base_name = concept_name.strip()
+    products = concept.get("products") or []
+    results: list[SearchResult] = []
+    for candidate in products:
+        if not isinstance(candidate, dict):
+            continue
+        product_id = candidate.get("id")
+        if not isinstance(product_id, str) or not product_id:
+            continue
+
+        merged = dict(candidate)
+        if not merged.get("media") and concept.get("media"):
+            merged["media"] = concept.get("media")
+        if not isinstance(merged.get("price"), dict) and isinstance(concept.get("price"), dict):
+            merged["price"] = concept.get("price")
+        if not merged.get("platforms") and concept.get("platforms"):
+            merged["platforms"] = concept.get("platforms")
+
+        product_name = merged.get("name")
+        if isinstance(product_name, str) and product_name.strip():
+            display_name = product_name.strip()
+        elif len(products) > 1:
+            display_name = f"{base_name} ({product_id.rsplit('-', 1)[-1]})"
+        else:
+            display_name = base_name
+
+        parsed = parse_graphql_product(
+            merged,
+            locale,
+            origin,
+            popularity_rank=popularity_rank,
+            name_override=display_name,
+        )
+        if parsed:
+            results.append(parsed)
+    return results
 
 
 async def fetch_category_products(
@@ -294,16 +312,16 @@ async def fetch_category_products(
         for concept in concepts:
             if not isinstance(concept, dict):
                 continue
-            parsed = parse_graphql_concept(
+            for parsed in parse_graphql_concept_products(
                 concept,
                 locale,
                 origin,
                 popularity_rank=len(results) + 1,
-            )
-            if parsed and parsed.product_id not in seen:
-                seen.add(parsed.product_id)
-                results.append(parsed)
-                page_count += 1
+            ):
+                if parsed.product_id not in seen:
+                    seen.add(parsed.product_id)
+                    results.append(parsed)
+                    page_count += 1
 
         if on_page:
             on_page(

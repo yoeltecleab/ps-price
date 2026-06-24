@@ -17,6 +17,7 @@ import { motion } from "motion/react";
 import { api } from "@/lib/api";
 import type { GameDetail, Watch } from "@/lib/types";
 import { formatDateTime, parseDollarsToCents } from "@/lib/format";
+import { refreshCatalogPrices } from "@/lib/catalogRefresh";
 import { PriceChart } from "@/components/PriceChart";
 import { AlertEmailSelect } from "@/components/AlertEmailSelect";
 import { WatchAlertFields } from "@/components/WatchAlertFields";
@@ -49,6 +50,7 @@ export default function GameDetailPage({
   const [creatingWatch, setCreatingWatch] = useState(false);
   const [watchSuccess, setWatchSuccess] = useState(false);
   const [confetti, setConfetti] = useState(false);
+  const [refreshNotice, setRefreshNotice] = useState<string | null>(null);
 
   const loadGame = useCallback(async () => {
     if (!gameId || Number.isNaN(gameId)) return;
@@ -69,8 +71,10 @@ export default function GameDetailPage({
 
   async function handleRefresh() {
     setRefreshing(true);
+    setRefreshNotice(null);
     try {
-      await api(`/api/games/${gameId}/refresh`, { method: "POST" });
+      const result = await refreshCatalogPrices();
+      if (result.message) setRefreshNotice(result.message);
       await loadGame();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Refresh failed");
@@ -288,6 +292,9 @@ export default function GameDetailPage({
               {game.availability ? <span className="mx-2 text-border">·</span> : null}
               {game.availability}
             </p>
+            {refreshNotice ? (
+              <p className="mt-2 font-data text-xs text-accent">{refreshNotice}</p>
+            ) : null}
           </div>
         </div>
       </section>
@@ -297,7 +304,8 @@ export default function GameDetailPage({
         game.publisher ||
         game.release_date ||
         game.rating_average ||
-        game.features?.length) && (
+        game.features?.length ||
+        game.screenshots?.length) && (
         <section className="holo-panel rounded-[var(--radius-xl)] p-6 md:p-8 space-y-6">
           {game.description_short || game.description_long ? (
             <div>
@@ -310,6 +318,74 @@ export default function GameDetailPage({
                   {game.description_long}
                 </p>
               ) : null}
+            </div>
+          ) : null}
+
+          {(game.publisher || game.release_date || game.rating_average) && (
+            <dl className="grid grid-cols-1 sm:grid-cols-3 gap-4 font-data text-sm">
+              {game.publisher ? (
+                <div>
+                  <dt className="text-xs uppercase tracking-widest text-muted">Publisher</dt>
+                  <dd className="mt-1 text-ink">{game.publisher}</dd>
+                </div>
+              ) : null}
+              {game.release_date ? (
+                <div>
+                  <dt className="text-xs uppercase tracking-widest text-muted">Release</dt>
+                  <dd className="mt-1 text-ink">{game.release_date}</dd>
+                </div>
+              ) : null}
+              {game.rating_average ? (
+                <div>
+                  <dt className="text-xs uppercase tracking-widest text-muted">Rating</dt>
+                  <dd className="mt-1 text-ink">
+                    {game.rating_average.toFixed(1)}
+                    {game.rating_count ? ` (${game.rating_count.toLocaleString()})` : ""}
+                  </dd>
+                </div>
+              ) : null}
+            </dl>
+          )}
+
+          {game.features?.length ? (
+            <div>
+              <h3 className="font-data text-xs uppercase tracking-widest text-muted mb-3">Features</h3>
+              <ul className="flex flex-wrap gap-2">
+                {game.features.map((feature) => (
+                  <li
+                    key={feature}
+                    className="font-data text-xs px-2.5 py-1 rounded-full border border-border text-muted"
+                  >
+                    {feature}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          {game.screenshots?.length ? (
+            <div>
+              <h3 className="font-data text-xs uppercase tracking-widest text-muted mb-3">Screenshots</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {game.screenshots.map((url) => (
+                  <a
+                    key={url}
+                    href={url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="relative aspect-video overflow-hidden rounded-[var(--radius-md)] border border-border bg-surface-raised"
+                  >
+                    <Image
+                      src={url}
+                      alt=""
+                      fill
+                      className="object-cover hover:scale-105 transition-transform duration-300"
+                      unoptimized
+                      sizes="(max-width: 768px) 100vw, 33vw"
+                    />
+                  </a>
+                ))}
+              </div>
             </div>
           ) : null}
         </section>

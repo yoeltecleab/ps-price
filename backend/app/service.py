@@ -39,9 +39,10 @@ import asyncio
 import logging
 import re
 
+from datetime import UTC, datetime
+
 from backend.app.auth_service import AuthService
 from backend.app.config import Settings
-from backend.app.money import discount_percent
 from backend.app.notifier import EmailNotifier
 from backend.app.ps_store import PlayStationStoreClient, extract_product_ref, normalize_locale
 from backend.app.repository import Repository, UNSET, utc_now_iso
@@ -94,16 +95,21 @@ class PriceService:
         game = self.repo.get_game_by_product(product_id, active_locale)
         if not game:
             raise ValueError(
-                "game not in catalog — sync the PlayStation feed first, then add from search"
+                "game not in catalog yet — wait for the catalog sync to finish, then search again"
             )
-        if not game:
-            raise ValueError(
-                "game not in catalog — sync the PlayStation feed first, then add from search"
-            )
-        # Link the game row to this user in the user_library join table.
         self.repo.add_user_library(user_id, game["id"])
         game = self.repo.get_game(game["id"]) or game
         game["is_tracked"] = True
+        return game
+
+    def get_catalog_game_by_product(
+        self, product_ref: str, locale: str | None = None
+    ) -> dict:
+        """Look up a catalog row by product id (database only)."""
+        product_id, active_locale = normalize_product_lookup(product_ref, locale)
+        game = self.repo.get_game_by_product(product_id, active_locale)
+        if not game:
+            raise KeyError("game not in catalog")
         return game
 
     async def track_catalog_game(self, game_id: int, *, user_id: int) -> dict:
@@ -135,19 +141,9 @@ class PriceService:
     # Catalog sync — fetch PlayStation prices and evaluate watches
     # -------------------------------------------------------------------------
 
-    async def sync_deals(self, locale: str | None = None, force: bool = False) -> dict:
-        """Pull the full PS Store catalog into the local database and evaluate watches.
-
-        This is the heart of the price-tracking loop:
-
-        1. Remember each library game's current price *before* the sync.
-        2. Download fresh deal data from PlayStation and upsert into ``games``.
-        3. For every library game whose price changed, run watch evaluation
-           (``_evaluate_watches``) so users get emails when rules match.
-        4. Stamp ``last_checked_at`` so the scheduler knows we are up to date.
-        """
+    async def sync_catalog(self, locale: str | None = None, force: bool = False) -> dict:
+        """Pull the full PS Store catalog into SQLite (all games, sale or not)."""
         active_locale = normalize_locale(locale or self.settings.store_locale)
-        # Snapshot old prices so we can detect drops after the upsert.
         tracked_before = {
             g["id"]: g.get("current_price_cents")
             for g in self.repo.list_all_library_games()
@@ -160,6 +156,7 @@ class PriceService:
         self.repo.set_catalog_meta("last_deals_reported", str(len(catalog_rows)))
         self.repo.set_catalog_meta("last_catalog_sync", now)
         self.repo.set_catalog_meta("last_catalog_reported", str(len(catalog_rows)))
+        self.repo.set_catalog_meta("last_catalog_refresh_at", now)
 
         for game in self.repo.list_all_library_games():
             full = self.repo.get_game(game["id"])
@@ -172,11 +169,76 @@ class PriceService:
             self.repo.mark_game_checked(full["id"], now)
 
         return {
-            "synced": count,
+            "synced": True,
+            "upserted": count,
             "fetched": len(catalog_rows),
             "locale": active_locale,
-            "catalog_total": len(catalog_rows),
+            "catalog_total": self.repo.catalog_count(),
+            "last_sync": now,
         }
+
+    async def sync_deals(self, locale: str | None = None, force: bool = False) -> dict:
+        """Backward-compatible alias for ``sync_catalog``."""
+        result = await self.sync_catalog(locale, force=force)
+        return {
+            "synced": result.get("upserted", 0),
+            "fetched": result.get("fetched", 0),
+            "locale": result.get("locale"),
+            "catalog_total": result.get("catalog_total", 0),
+        }
+
+    def catalog_refresh_status(self) -> dict:
+        """Return global catalog refresh metadata for the UI cooldown."""
+        last = (
+            self.repo.get_catalog_meta("last_catalog_refresh_at")
+            or self.repo.get_catalog_meta("last_catalog_sync")
+        )
+        cooldown = self.settings.catalog_refresh_cooldown_seconds
+        elapsed = self._seconds_since_iso(last)
+        retry_after = 0
+        can_refresh = True
+        if elapsed is not None and cooldown > 0 and elapsed < cooldown:
+            can_refresh = False
+            retry_after = int(cooldown - elapsed)
+        return {
+            "last_sync": last,
+            "catalog_total": self.repo.catalog_count(),
+            "synced_count": self.repo.get_catalog_meta("last_deals_count"),
+            "fetched_count": self.repo.get_catalog_meta("last_deals_reported"),
+            "cooldown_seconds": cooldown,
+            "retry_after_seconds": retry_after,
+            "can_refresh": can_refresh,
+        }
+
+    async def refresh_catalog_public(self, *, force: bool = False) -> dict:
+        """Rate-limited full catalog refresh for UI buttons (shared across all users)."""
+        status = self.catalog_refresh_status()
+        if not force and not status["can_refresh"]:
+            return {
+                **status,
+                "synced": False,
+                "cooldown": True,
+                "message": "Prices were refreshed recently. Showing cached catalog data.",
+            }
+        result = await self.sync_catalog(force=True)
+        return {
+            **self.catalog_refresh_status(),
+            **result,
+            "synced": True,
+            "cooldown": False,
+            "message": "Catalog refreshed from PlayStation Store.",
+        }
+
+    def _seconds_since_iso(self, value: str | None) -> float | None:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+        except ValueError:
+            return None
+        return (datetime.now(UTC) - parsed).total_seconds()
 
     # -------------------------------------------------------------------------
     # Search and browse — read-only catalog queries (no store HTTP)
@@ -185,17 +247,12 @@ class PriceService:
     async def search_unified(
         self, query: str, locale: str | None, limit: int, user_id: int | None = None
     ) -> list[dict]:
-        """Search the local catalog only (no live PlayStation Store calls).
-
-        ``asyncio.to_thread`` runs the blocking SQL search on a worker thread so
-        we do not freeze the async event loop while SQLite works.
-        """
+        """Search the local catalog only (no live PlayStation Store calls)."""
         clean = " ".join(query.split())
         if not clean:
             return []
         bounded = max(1, min(limit, self.settings.max_search_limit))
         rows = await asyncio.to_thread(self.repo.search_catalog, clean, bounded)
-        # Mark which results are already in the signed-in user's library.
         annotated = self.repo.annotate_user_tracked(user_id, rows)
         return [{**row, "source": "catalog"} for row in annotated]
 
@@ -237,12 +294,25 @@ class PriceService:
         rows = self.repo.suggest_names(q, limit)
         return self.repo.annotate_user_tracked(user_id, rows)
 
-    async def refresh_game(self, game_id: int, force: bool = True) -> dict:
-        """Refresh all catalog prices from PlayStation (same as sync-deals)."""
-        await self.sync_deals(force=force)
+    async def refresh_game(self, game_id: int, force: bool = False) -> dict:
+        """Refresh the full catalog (rate-limited); returns the requested game from DB."""
         game = self.repo.get_game(game_id)
         if not game:
             raise KeyError("game not found")
+        await self.refresh_catalog_public(force=force)
+        refreshed = self.repo.get_game(game_id)
+        if not refreshed:
+            raise KeyError("game not found")
+        return refreshed
+
+    def get_game_detail(self, game_id: int, user_id: int | None = None) -> dict:
+        """Return a game with price history from the local database."""
+        game = self.repo.get_game(game_id)
+        if not game:
+            raise KeyError("game not found")
+        if user_id is not None:
+            game["is_tracked"] = self.repo.user_has_library_game(user_id, game_id)
+        game["history"] = self.repo.get_history(game_id)
         return game
 
     async def search(
@@ -265,7 +335,7 @@ class PriceService:
         if not due:
             return {"due": 0, "refreshed": 0, "failed": [], "synced": False}
         try:
-            result = await self.sync_deals(force=True)
+            result = await self.sync_catalog(force=True)
             now = utc_now_iso()
             for game in due:
                 self.repo.mark_game_checked(game["id"], now)

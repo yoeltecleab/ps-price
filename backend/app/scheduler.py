@@ -78,18 +78,16 @@ class PriceScheduler:
                 await self._task
 
     async def _run(self) -> None:
-        """Main scheduler loop — sync, then sleep, repeat."""
+        """Main scheduler loop — wait, sync, repeat."""
+        wait_seconds = max(60, self.settings.feed_sync_interval_minutes * 60)
         while not self._stop.is_set():
             try:
-                # ``sync_deals`` hits GraphQL + database — may take minutes.
-                await self.service.sync_deals()
-            except Exception:
-                logger.exception("Scheduled catalog sync failed")
-            # Enforce a minimum 60s wait even if config says something smaller.
-            wait_seconds = max(60, self.settings.feed_sync_interval_minutes * 60)
-            try:
-                # Sleep until timeout OR until stop() sets _stop (whichever first).
                 await asyncio.wait_for(self._stop.wait(), timeout=wait_seconds)
             except asyncio.TimeoutError:
-                # Normal path: timer elapsed, run sync again.
-                continue
+                pass
+            if self._stop.is_set():
+                break
+            try:
+                await self.service.sync_catalog()
+            except Exception:
+                logger.exception("Scheduled catalog sync failed")

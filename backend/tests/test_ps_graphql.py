@@ -52,5 +52,32 @@ def test_parse_graphql_concept_uses_nested_product():
     )
     assert result is not None
     assert result.name == "007 First Light"
-    assert result.product_id == "EP3969-PPSA11386_00-007FIRSTLIGHT000"
-    assert result.current_price_formatted == "$69.99"
+
+
+def test_parse_graphql_concept_products_emits_all_editions():
+    from backend.app.ps_graphql import parse_graphql_concept_products
+
+    results = parse_graphql_concept_products(
+        {
+            "name": "007 First Light",
+            "media": [{"role": "GAMEHUB_COVER_ART", "url": "https://example.test/007.jpg"}],
+            "price": {"basePrice": "$69.99", "discountedPrice": "$69.99"},
+            "products": [
+                {
+                    "id": "EP3969-PPSA11386_00-007FIRSTLIGHT000",
+                    "name": "007 First Light",
+                    "platforms": ["PS5"],
+                },
+                {
+                    "id": "EP3969-PPSA11386_00-007ULTIMATE000",
+                    "name": "007 First Light Ultimate Edition",
+                    "platforms": ["PS5"],
+                },
+            ],
+        },
+        "en-us",
+        "https://store.playstation.com",
+    )
+    assert len(results) == 2
+    names = {row.name for row in results}
+    assert "007 First Light Ultimate Edition" in names

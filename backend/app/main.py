@@ -27,6 +27,8 @@ Routes are grouped by feature:
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from contextlib import asynccontextmanager
 from typing import Annotated
@@ -118,9 +120,27 @@ async def lifespan(app: FastAPI):
     app.state.scheduler = scheduler
 
     await scheduler.start()
+
+    async def _startup_catalog_sync() -> None:
+        if not settings.sync_on_startup:
+            return
+        try:
+            logger.info("Startup catalog sync beginning")
+            result = await service.sync_catalog(force=True)
+            logger.info("Startup catalog sync finished: %s", result)
+        except Exception:
+            logger.exception("Startup catalog sync failed")
+
+    startup_sync_task = asyncio.create_task(
+        _startup_catalog_sync(), name="ps-price-startup-sync"
+    )
+
     try:
         yield
     finally:
+        startup_sync_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await startup_sync_task
         await scheduler.stop()
         await store_client.close()
 
@@ -190,14 +210,20 @@ def healthz(
 
 
 @app.get("/api/sync-status")
-def sync_status(repo: Annotated[Repository, Depends(repo_dep)]):
-    """Return catalog sync metadata for the frontend status pill."""
-    return {
-        "last_sync": repo.get_catalog_meta("last_deals_sync"),
-        "synced_count": repo.get_catalog_meta("last_deals_count"),
-        "fetched_count": repo.get_catalog_meta("last_deals_reported"),
-        "catalog_total": repo.catalog_count(),
-    }
+def sync_status(service: Annotated[PriceService, Depends(service_dep)]):
+    """Return catalog sync metadata and UI refresh cooldown state."""
+    return service.catalog_refresh_status()
+
+
+@app.post("/api/catalog/refresh")
+async def refresh_catalog_public(
+    service: Annotated[PriceService, Depends(service_dep)],
+):
+    """Rate-limited full catalog refresh (shared cooldown across all users)."""
+    try:
+        return await service.refresh_catalog_public()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -259,10 +285,10 @@ async def sync_deals(
     service: Annotated[PriceService, Depends(service_dep)],
     user: AdminUserDep,
     locale: str | None = None,
-    force: bool = Query(default=False),
+    force: bool = Query(default=True),
 ):
     try:
-        return await service.sync_deals(locale, force=force)
+        return await service.sync_catalog(locale, force=force)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -340,28 +366,23 @@ def list_games(
 @app.get("/api/games/{game_id}", response_model=GameDetail)
 def get_game(
     game_id: int,
-    repo: Annotated[Repository, Depends(repo_dep)],
+    service: Annotated[PriceService, Depends(service_dep)],
     user: OptionalUserDep,
 ):
-    game = repo.get_game(game_id)
-    if not game:
-        raise HTTPException(status_code=404, detail="game not found")
-    if user:
-        game["is_tracked"] = repo.user_has_library_game(user["id"], game_id)
-    game["history"] = repo.get_history(game_id)
-    return game
+    try:
+        user_id = user["id"] if user else None
+        return service.get_game_detail(game_id, user_id=user_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="game not found") from exc
 
 
 @app.post("/api/games/{game_id}/refresh", response_model=GameOut)
 async def refresh_game(
     game_id: int,
     service: Annotated[PriceService, Depends(service_dep)],
-    user: VerifiedUserDep,
 ):
-    if not service.repo.user_has_library_game(user["id"], game_id):
-        raise HTTPException(status_code=404, detail="game not in library")
     try:
-        return await service.refresh_game(game_id, force=True)
+        return await service.refresh_game(game_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:

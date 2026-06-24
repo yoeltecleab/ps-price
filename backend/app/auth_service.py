@@ -339,6 +339,7 @@ class AuthService:
             "display_name": user.get("display_name"),
             "email_verified": bool(user.get("email_verified_at")),
             "has_password": bool(user.get("password_hash")),
+            "preferred_theme_id": user.get("preferred_theme_id"),
         }
 
     # Backward-compatible alias used during migration of call sites.

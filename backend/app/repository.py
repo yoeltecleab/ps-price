@@ -426,9 +426,10 @@ class Repository:
         with self.db._lock, self.db.connect() as conn:
             for entry in entries:
                 existing = conn.execute(
-                    "SELECT id, is_tracked FROM games WHERE product_id = ? AND locale = ?",
+                    "SELECT * FROM games WHERE product_id = ? AND locale = ?",
                     (entry.product_id, entry.locale),
                 ).fetchone()
+                existing_dict = dict(existing) if existing else None
                 pct = discount_percent(entry.current_price_cents, entry.original_price_cents)
                 platforms_json = json.dumps(entry.platforms)
                 # Derive a simple availability label from the price fields.
@@ -438,7 +439,41 @@ class Repository:
                 elif entry.current_price_cents is None:
                     availability = "unknown"
 
-                if existing:
+                def keep_rich(new_val: object | None, field: str) -> object | None:
+                    """Keep scraped detail when GraphQL sync rows omit descriptions."""
+                    if new_val:
+                        return new_val
+                    if existing_dict:
+                        return existing_dict.get(field)
+                    return None
+
+                description_short = keep_rich(entry.description_short, "description_short")
+                description_long = keep_rich(entry.description_long, "description_long")
+                publisher = keep_rich(entry.publisher, "publisher")
+                release_date = keep_rich(entry.release_date, "release_date")
+                edition = keep_rich(entry.edition, "edition")
+                genres_json = _json_list(entry.genres) or (
+                    existing_dict.get("genres") if existing_dict else None
+                )
+                features_json = _json_list(entry.features) or (
+                    existing_dict.get("features") if existing_dict else None
+                )
+                screenshots_json = _json_list(entry.screenshots) or (
+                    existing_dict.get("screenshots") if existing_dict else None
+                )
+                rating_average = (
+                    entry.rating_average
+                    if entry.rating_average is not None
+                    else (existing_dict.get("rating_average") if existing_dict else None)
+                )
+                rating_count = (
+                    entry.rating_count
+                    if entry.rating_count is not None
+                    else (existing_dict.get("rating_count") if existing_dict else None)
+                )
+                content_rating = keep_rich(entry.content_rating, "content_rating")
+
+                if existing_dict:
                     conn.execute(
                         """
                         UPDATE games
@@ -469,19 +504,19 @@ class Repository:
                             pct,
                             now,
                             entry.popularity_rank,
-                            entry.description_short,
-                            entry.description_long,
-                            entry.publisher,
-                            entry.release_date,
-                            _json_list(entry.genres),
-                            _json_list(entry.features),
-                            entry.rating_average,
-                            entry.rating_count,
-                            entry.content_rating,
-                            _json_list(entry.screenshots),
-                            entry.edition,
+                            description_short,
+                            description_long,
+                            publisher,
+                            release_date,
+                            genres_json,
+                            features_json,
+                            rating_average,
+                            rating_count,
+                            content_rating,
+                            screenshots_json,
+                            edition,
                             now,
-                            existing["id"],
+                            existing_dict["id"],
                         ),
                     )
                 else:
@@ -619,9 +654,11 @@ class Repository:
             where_parts: list[str] = []
             params: list[object] = []
             for token in tokens:
-                where_parts.append("(name LIKE ? OR product_id LIKE ?)")
+                where_parts.append(
+                    "(name LIKE ? OR product_id LIKE ? OR edition LIKE ? OR description_short LIKE ?)"
+                )
                 pattern = f"%{token}%"
-                params.extend([pattern, pattern])
+                params.extend([pattern, pattern, pattern, pattern])
             where = " AND ".join(where_parts)
             prefix = f"{clean}%"
             rows = conn.execute(

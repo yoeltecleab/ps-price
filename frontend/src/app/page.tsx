@@ -14,6 +14,11 @@ import { Button } from "@/components/Button";
 import { Skeleton } from "@/components/Skeleton";
 import { useTheme } from "@/components/ThemeProvider";
 import { useAuth } from "@/lib/auth";
+import {
+  fetchSyncStatus,
+  refreshCatalogPrices,
+  type SyncStatus,
+} from "@/lib/catalogRefresh";
 
 const defaultFilters: DealFilters = {
   q: "",
@@ -32,11 +37,8 @@ export default function DealsHomePage() {
   const [data, setData] = useState<DealsPage | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
-  const [syncStatus, setSyncStatus] = useState<{
-    catalog_total: number;
-    fetched_count: string | null;
-    last_sync: string | null;
-  } | null>(null);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
+  const [refreshNotice, setRefreshNotice] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [trackingId, setTrackingId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -76,11 +78,7 @@ export default function DealsHomePage() {
 
   const pollSyncStatus = useCallback(async () => {
     try {
-      const status = await api<{
-        catalog_total: number;
-        fetched_count: string | null;
-        last_sync: string | null;
-      }>("/api/sync-status");
+      const status = await fetchSyncStatus();
       setSyncStatus(status);
       return status;
     } catch {
@@ -95,15 +93,19 @@ export default function DealsHomePage() {
   useEffect(() => {
     void pollSyncStatus().then((status) => {
       if (status) {
-        setSyncing(status.catalog_total === 0 && !status.last_sync);
+        const bootstrapping = status.catalog_total === 0 && !status.last_sync;
+        setSyncing(bootstrapping);
+        if (bootstrapping) void loadDeals();
       }
     });
     pollRef.current = setInterval(() => {
       void pollSyncStatus().then((status) => {
         if (!status) return;
-        setSyncing(status.catalog_total === 0 && !status.last_sync);
+        const bootstrapping = status.catalog_total === 0 && !status.last_sync;
+        setSyncing(bootstrapping);
+        if (bootstrapping) void loadDeals();
       });
-    }, 3000);
+    }, 5000);
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
@@ -113,13 +115,36 @@ export default function DealsHomePage() {
     setSelected(new Set());
   }, [page, queryString]);
 
-  async function handleSync() {
+  async function handlePublicRefresh() {
     setSyncing(true);
+    setRefreshNotice(null);
+    try {
+      const result = await refreshCatalogPrices();
+      if (result.cooldown && result.message) {
+        setRefreshNotice(result.message);
+      } else if (result.message) {
+        setRefreshNotice(result.message);
+      }
+      setPage(0);
+      await pollSyncStatus();
+      await loadDeals();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Refresh failed");
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  async function handleAdminSync() {
+    if (!user?.is_admin) return;
+    setSyncing(true);
+    setRefreshNotice(null);
     try {
       await api("/api/sync-deals", { method: "POST" });
       setPage(0);
       await pollSyncStatus();
       await loadDeals();
+      setRefreshNotice("Admin catalog sync completed.");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Sync failed");
     } finally {
@@ -265,7 +290,7 @@ export default function DealsHomePage() {
             { label: "Peak cut", value: topDiscount ? `${topDiscount}%` : "—", glow: true },
             {
               label: "Feed status",
-              value: syncing ? "SYNC" : data?.last_sync ? "ACTIVE" : "INIT",
+              value: syncing ? "SYNCING" : data?.last_sync ? "ACTIVE" : "READY",
               glow: false,
             },
             {
@@ -299,13 +324,24 @@ export default function DealsHomePage() {
           transition={{ delay: 0.3 }}
           className="mt-6 flex flex-wrap items-center gap-3"
         >
+          <Button onClick={handlePublicRefresh} loading={syncing} size="lg" variant="secondary">
+            <ArrowsClockwise className="size-4" weight="bold" />
+            {syncing ? "Refreshing prices…" : "Refresh prices"}
+          </Button>
           {user?.is_admin ? (
-            <Button onClick={handleSync} loading={syncing} size="lg">
-              <ArrowsClockwise className="size-4" weight="bold" />
-              {syncing ? "Syncing catalog…" : "Sync PlayStation catalog"}
+            <Button onClick={handleAdminSync} loading={syncing} size="lg" variant="ghost">
+              Admin force sync
             </Button>
           ) : null}
-          {data?.last_sync ? (
+          {refreshNotice ? (
+            <span className="font-data text-xs text-accent">{refreshNotice}</span>
+          ) : null}
+          {syncing && !data?.last_sync ? (
+            <span className="font-data text-xs text-muted flex items-center gap-1.5">
+              <ArrowsClockwise className="size-3.5 text-accent animate-spin" />
+              Catalog syncing on server after deploy…
+            </span>
+          ) : data?.last_sync ? (
             <span className="font-data text-xs text-muted flex items-center gap-1.5">
               <Lightning weight="fill" className="size-3.5 text-accent" />
               {new Date(data.last_sync).toLocaleString()}
@@ -361,16 +397,17 @@ export default function DealsHomePage() {
         </div>
       ) : items.length === 0 ? (
         <div className="text-center py-24 holo-panel-strong rounded-[var(--radius-xl)]">
-          <p className="font-display text-2xl font-bold text-ink">Signal lost</p>
-          <p className="mt-3 text-muted max-w-sm mx-auto text-pretty">
-            No games match your filters.{" "}
-            {user?.is_admin
-              ? "Sync the catalog or widen your search."
-              : "Widen your search or wait for the scheduled catalog sync."}
+          <p className="font-display text-2xl font-bold text-ink">
+            {syncing ? "Catalog syncing" : "Signal lost"}
           </p>
-          {user?.is_admin ? (
-            <Button className="mt-8" size="lg" onClick={handleSync} loading={syncing}>
-              Initialize feed
+          <p className="mt-3 text-muted max-w-sm mx-auto text-pretty">
+            {syncing
+              ? "The server is loading the PlayStation catalog after startup. This page will populate automatically."
+              : "No games match your filters. Widen your search or adjust filters."}
+          </p>
+          {user?.is_admin && !syncing ? (
+            <Button className="mt-8" size="lg" onClick={handleAdminSync} loading={syncing}>
+              Admin force sync
             </Button>
           ) : null}
         </div>
@@ -380,7 +417,7 @@ export default function DealsHomePage() {
             <h2 className="font-data text-xs uppercase tracking-[0.25em] text-muted mb-4">
               {filters.onSaleOnly ? "Deals" : "All games"}
             </h2>
-            <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4 items-stretch">
               {items.map((game, i) => (
                 <DealCard
                   key={game.id}

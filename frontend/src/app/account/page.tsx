@@ -156,7 +156,9 @@ export default function AccountPage() {
       <section className="holo-panel rounded-[var(--radius-xl)] p-6 space-y-4">
         <h2 className="font-data text-xs uppercase tracking-widest text-accent">Notification emails</h2>
         <ul className="space-y-2">
-          {notificationEmails.map((row) => (
+          {notificationEmails.map((row) => {
+            const showLabel = row.label && !(row.is_primary && /primary/i.test(row.label));
+            return (
             <li
               key={row.id}
               className="flex flex-wrap items-center justify-between gap-2 rounded-[var(--radius-md)] border border-border/50 px-4 py-3"
@@ -164,11 +166,16 @@ export default function AccountPage() {
               <div>
                 <p className="text-sm text-ink">{row.email}</p>
                 <p className="text-xs text-muted">
-                  {row.label || "No label"} · {row.verified ? "Verified" : "Pending"}{" "}
-                  {row.is_primary ? "· Primary" : ""}
+                  {showLabel ? `${row.label} · ` : row.label ? "" : "No label · "}
+                  {row.verified ? "Verified" : "Pending"}
                 </p>
               </div>
-              <div className="flex gap-2">
+              <div className="flex items-center gap-2">
+                {row.is_primary ? (
+                  <span className="text-[11px] font-data uppercase tracking-widest text-accent px-2 py-0.5 rounded-full border border-accent/30">
+                    Primary
+                  </span>
+                ) : null}
                 {row.verified && !row.is_primary ? (
                   <Button size="sm" variant="secondary" onClick={() => setPrimary(row.id)}>
                     Make primary
@@ -181,7 +188,8 @@ export default function AccountPage() {
                 ) : null}
               </div>
             </li>
-          ))}
+            );
+          })}
         </ul>
         <form onSubmit={addEmail} className="grid gap-3 sm:grid-cols-2">
           <Input label="New email" type="email" value={newEmail} onChange={(e) => setNewEmail(e.target.value)} required />

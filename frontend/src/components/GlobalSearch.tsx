@@ -68,7 +68,7 @@ export function GlobalSearch() {
     setError(null);
     try {
       const res = await fetch(
-        `/api/search?q=${encodeURIComponent(trimmed)}&limit=16`,
+        `/api/search?q=${encodeURIComponent(trimmed)}&limit=48`,
         { signal: controller.signal, cache: "no-store" },
       );
       if (!res.ok) {
@@ -77,7 +77,7 @@ export function GlobalSearch() {
       }
       const data = (await res.json()) as SearchResult[];
       if (!controller.signal.aborted) {
-        setResults(data);
+        setResults(data.filter((row) => row.id != null));
         setActiveIndex(data.length ? 0 : -1);
         updatePosition();
       }
@@ -154,13 +154,9 @@ export function GlobalSearch() {
   const showDropdown = open && query.trim().length > 0 && positioned;
 
   function openResult(result: SearchResult) {
+    if (!result.id) return;
     setOpen(false);
-    if (result.id) {
-      router.push(`/games/${result.id}`);
-      return;
-    }
-    setError("Sync the PlayStation feed first to index this title.");
-    setOpen(true);
+    router.push(`/games/${result.id}`);
   }
 
   function handleKeyDown(e: React.KeyboardEvent) {
@@ -183,7 +179,7 @@ export function GlobalSearch() {
 
   function renderResult(item: SearchResult, index: number) {
     return (
-      <li key={`${item.product_id}-${item.id ?? "x"}`} role="option" aria-selected={index === activeIndex}>
+      <li key={item.id} role="option" aria-selected={index === activeIndex}>
         <button
           type="button"
           onMouseDown={(e) => e.preventDefault()}
@@ -258,7 +254,8 @@ export function GlobalSearch() {
             <p className="px-5 py-4 text-sm text-error">{error}</p>
           ) : !loading && results.length === 0 ? (
             <p className="px-5 py-4 text-sm text-muted">
-              No matches for &ldquo;{query.trim()}&rdquo; — sync the feed or try another spelling
+              No matches for &ldquo;{query.trim()}&rdquo; in the local catalog yet. If the server
+              just deployed, wait for the startup sync to finish.
             </p>
           ) : (
             <ul>{results.map((item, index) => renderResult(item, index))}</ul>
@@ -290,7 +287,7 @@ export function GlobalSearch() {
           updatePosition();
         }}
         onKeyDown={handleKeyDown}
-        placeholder="Search local catalog…"
+        placeholder="Search the catalog…"
         className="h-12 w-full rounded-[var(--radius-md)] holo-panel pl-10 pr-24 text-base text-ink placeholder:text-muted focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 font-data"
         aria-label="Search games"
         role="combobox"
