@@ -1,14 +1,49 @@
 """PlayStation Store scraping client and HTML/JSON parsing helpers.
 
-This module contains a compact async HTTP client tailored to scrape
-product pages and search results from the PlayStation Store. It
-implements lightweight caching, rate limiting (minimum interval
-between requests), retry/backoff semantics, and multiple parsing
-strategies to extract price and metadata.
+**What this module does (big picture)**
 
-The parsing functions are defensive: they attempt to read structured
-JSON-LD and Next.js/Apollo state from the page before falling back to
-simpler HTML heuristics.
+When you open a PlayStation Store page in a browser, the server sends back
+HTML. That HTML often hides the real product data inside ``<script>`` tags
+as JSON. This module:
+
+1. **Fetches** pages over HTTP (like a browser, but automated).
+2. **Parses** the HTML to pull out prices, names, images, and metadata.
+3. **Caches** recent results so we do not hammer the store with duplicate
+   requests.
+4. **Rate-limits** itself so we wait between requests (being a polite
+   scraper).
+
+**Key Python concepts you will see here**
+
+- ``async`` / ``await`` — lets one program juggle many network requests
+  without blocking (see ``scheduler.py`` for how this fits the app).
+- ``httpx.AsyncClient`` — an HTTP library; ``client.get(url)`` is like
+  visiting a URL and reading the response body.
+- ``re.compile`` — pre-built regular expressions for finding patterns in
+  text (product IDs, JSON blobs inside HTML).
+- ``dataclass`` — a small class that mainly holds data (see ``domain.py``).
+
+**HTTP fetching flow**
+
+::
+
+    fetch_product() or search()
+        → check in-memory cache
+        → _get_text(url)          # actual HTTP GET with retries
+        → parse_*_page(html)      # turn HTML into Python objects
+        → store in cache and return
+
+**Price parsing strategy (defensive / layered)**
+
+We try several sources of truth, best-first:
+
+1. Embedded **Apollo/React cache** in ``<script id="env:...">`` blocks.
+2. **JSON-LD** (``<script type="application/ld+json">``) — a standard way
+   sites describe products for search engines.
+3. **Next.js** ``__NEXT_DATA__`` for search result lists.
+4. Simple **link scraping** as a last resort.
+
+If we cannot find a product name, we raise ``ProductParseError``.
 """
 
 from __future__ import annotations
@@ -31,34 +66,62 @@ from backend.app.domain import ProductSnapshot, SearchResult
 from backend.app.money import currency_for_locale, format_cents, money_to_cents
 
 
+# --- Regular expressions (pattern matchers for text) ---
+# PlayStation product IDs look like long alphanumeric strings, e.g.
+# "UP0001-CUSA12345_00-ABCDEFGHIJKL".
 PRODUCT_RE = re.compile(r"^[A-Z0-9_-]{12,}$")
+# Locales are language-region pairs like "en-us" (US English).
 LOCALE_RE = re.compile(r"^[a-z]{2}-[a-z]{2}$")
+# Modern PS Store pages embed JSON inside <script> tags.  re.S lets "."
+# match newlines so we can capture multi-line JSON bodies.
 ENV_SCRIPT_RE = re.compile(
     r'<script id="(env:[^\"]+)" type="application/json">(.*?)</script>', re.S
 )
+# JSON-LD is structured data many sites include for Google/search bots.
 JSONLD_RE = re.compile(
     r'<script id="mfe-jsonld-tags" type="application/ld\+json">(.*?)</script>', re.S
 )
+# Next.js (the framework behind the store front-end) dumps page state here.
 NEXT_DATA_RE = re.compile(
     r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', re.S
 )
+# Fallback: find product links directly in raw HTML hrefs/paths.
 PRODUCT_LINK_RE = re.compile(r"/(?P<locale>[a-z]{2}-[a-z]{2})/product/(?P<product>[A-Z0-9_-]+)")
 
 
 class StoreClientError(RuntimeError):
-    """Base exception for PlayStationStoreClient errors."""
+    """Base exception for PlayStationStoreClient errors.
+
+    In Python, you can define your own exception types by subclassing
+    ``Exception`` (here we use ``RuntimeError``).  Callers can catch
+    ``StoreClientError`` to handle *any* store-related failure in one place.
+    """
 
 
 class ProductNotFound(StoreClientError):
-    """Raised when the PlayStation Store returns a 404 for a product URL."""
+    """Raised when the PlayStation Store returns a 404 for a product URL.
+
+    HTTP status **404** means "not found" — the product may have been
+    delisted or the ID/locale combination is wrong.
+    """
 
 
 class ProductParseError(StoreClientError):
-    """Raised when the client cannot extract required product fields."""
+    """Raised when the client cannot extract required product fields.
+
+    Parsing succeeded at the HTTP level (we got HTML), but the page did not
+    contain enough structured data to build a ``ProductSnapshot``.
+    """
 
 
 @dataclass
 class _CacheEntry:
+    """One cached HTTP response plus when we fetched it.
+
+    The leading underscore in the name signals "internal use only" — other
+    modules should not depend on this helper type.
+    """
+
     fetched_at: datetime
     value: object
 
@@ -66,14 +129,26 @@ class _CacheEntry:
 class PlayStationStoreClient:
     """Async HTTP client and parser for PlayStation Store pages.
 
-    The client implements a per-instance in-memory cache (TTL controlled
-    via settings), basic rate limiting (minimum seconds between
-    requests) and retry logic for 429/5xx responses. It exposes two main
-    async methods: `fetch_product(...)` and `search(...)`.
+    Think of this class as a specialized web browser for the PS Store:
+
+    - **One shared HTTP client** (``httpx.AsyncClient``) reuses TCP
+      connections across requests — faster than opening a new connection
+      every time.
+    - **In-memory cache** — a ``dict`` mapping cache keys to
+      ``_CacheEntry`` objects.  Entries expire after ``cache_ttl_seconds``.
+    - **Rate limiting** — ``_wait_for_slot()`` enforces a minimum pause
+      between requests so we do not get blocked.
+    - **Retries** — transient errors (HTTP 429 "too many requests", 5xx
+      server errors) trigger exponential backoff sleeps before retrying.
+
+    Main public methods: ``fetch_product``, ``search``, ``fetch_deals``.
     """
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        # AsyncClient is created once and reused for the lifetime of this
+        # object.  ``follow_redirects=True`` means 301/302 redirects are
+        # followed automatically (like a browser).
         self._client = httpx.AsyncClient(
             timeout=settings.request_timeout_seconds,
             follow_redirects=True,
@@ -83,8 +158,10 @@ class PlayStationStoreClient:
                 "Accept-Language": "en-US,en;q=0.9",
             },
         )
+        # asyncio.Lock ensures only one coroutine updates the rate-limit
+        # timer at a time (important when many requests run concurrently).
         self._lock = asyncio.Lock()
-        self._last_request_at = 0.0
+        self._last_request_at = 0.0  # monotonic clock time of last HTTP GET
         self._cache: dict[str, _CacheEntry] = {}
 
     async def close(self) -> None:
@@ -99,14 +176,17 @@ class PlayStationStoreClient:
         `product_ref` may be a raw product id or a full product URL. If
         `force` is True the cache will be ignored.
         """
+        # Step 1: normalize input — callers may pass a bare ID or a full URL.
         product_id, detected_locale = extract_product_ref(product_ref)
         active_locale = normalize_locale(locale or detected_locale or self.settings.store_locale)
         url = product_url(self.settings.store_origin, active_locale, product_id)
+        # Step 2: return cached snapshot if still fresh (unless force=True).
         cache_key = f"product:{url}"
         cached = self._get_cached(cache_key, force)
         if isinstance(cached, ProductSnapshot):
             return cached
 
+        # Step 3: HTTP GET → parse HTML → build immutable ProductSnapshot.
         page = await self._get_text(url)
         snapshot = parse_product_page(page, product_id, active_locale, url)
         self._cache[cache_key] = _CacheEntry(datetime.now(UTC), snapshot)
@@ -142,7 +222,12 @@ class PlayStationStoreClient:
     async def fetch_deals(
         self, locale: str | None = None, force: bool = False
     ) -> list[SearchResult]:
-        """Fetch the full PlayStation Store catalog (all games + deal pricing)."""
+        """Fetch the full PlayStation Store catalog (all games + deal pricing).
+
+        HTML search pages only show ~12–24 items.  For the full catalog we
+        delegate to ``ps_graphql.py``, which talks to Sony's GraphQL API
+        and can return thousands of products (see that module for details).
+        """
         from backend.app.ps_graphql import fetch_store_catalog
 
         active_locale = normalize_locale(locale or self.settings.store_locale)
@@ -193,14 +278,18 @@ class PlayStationStoreClient:
             if min_interval is None
             else min_interval
         )
+        # Retry loop: ``attempt`` goes 0, 1, 2, … up to request_retries - 1.
         for attempt in range(self.settings.request_retries):
             await self._wait_for_slot(interval)
+            # ``await`` yields control while waiting for the network response.
             response = await self._client.get(url)
             if response.status_code == 404:
                 raise ProductNotFound(f"PlayStation Store returned 404 for {url}")
+            # 429 = rate limited by the server; honor Retry-After header if present.
             if response.status_code == 429:
                 await asyncio.sleep(_retry_after_seconds(response) or (2**attempt * 5))
                 continue
+            # 5xx = server-side error; exponential backoff (1s, 2s, 4s, …).
             if 500 <= response.status_code < 600:
                 await asyncio.sleep(2**attempt)
                 continue
@@ -230,7 +319,11 @@ class PlayStationStoreClient:
 def extract_product_ref(product_ref: str) -> tuple[str, str | None]:
     """Parse a product reference which may be an id or a product URL.
 
-    Returns a tuple (product_id, locale_or_None).
+    Returns a tuple ``(product_id, locale_or_None)``.
+
+    ``urlparse`` breaks a URL into parts (scheme, host, path).  If the input
+    looks like a URL we regex-scan the path; otherwise we validate it as a
+    bare product ID.
     """
     candidate = product_ref.strip()
     if not candidate:
@@ -271,9 +364,13 @@ def parse_product_page(
     (product name) cannot be found.
     """
     now = datetime.now(UTC)
+    # --- Layer 1: JSON-LD (schema.org product metadata) ---
     jsonld = _extract_jsonld(page_html)
+    # --- Layer 2: Apollo component cache (richest price data) ---
     product_data, price_data = _extract_product_component_data(page_html, product_id)
 
+    # Walk a priority list of fields; ``_first_text`` returns the first
+    # non-empty string (like picking the best answer from several sources).
     name = _first_text(
         product_data.get("name") if product_data else None,
         jsonld.get("name") if jsonld else None,
@@ -328,13 +425,17 @@ def parse_product_page(
         price_data.get("discountText") if price_data else None,
         product_price.get("discountText"),
     )
+    # Derive a simple availability label from parsed price cents.
     availability = "unavailable"
     if current_cents == 0:
         availability = "free"
     elif current_cents is not None:
         availability = "available"
 
+    # Sale end times arrive as Unix milliseconds; convert to datetime.
     sale_end_at = _parse_millis_timestamp(price_data.get("endTime") if price_data else None)
+    # SHA-256 hash lets us detect whether underlying store data changed
+    # without storing the entire HTML page in the database.
     raw_hash = hashlib.sha256(_relevant_source(page_html, product_id).encode()).hexdigest()
     metadata = extract_product_metadata(page_html, product_id)
     return ProductSnapshot(
@@ -478,6 +579,7 @@ def _merged_product_cache(page_html: str, product_id: str) -> dict[str, Any]:
 
 
 def _strip_html(value: str | None) -> str | None:
+    """Remove HTML tags and collapse whitespace (for description fields)."""
     if not value:
         return None
     cleaned = re.sub(r"<[^>]+>", " ", value)
@@ -490,9 +592,13 @@ def parse_search_page(page_html: str, locale: str, origin: str) -> list[SearchRe
 
     The parser prefers Next.js/Apollo state but falls back to extracting
     simple product links when structured data is not present.
+
+    ``seen`` is a set used to deduplicate product IDs — the same game can
+    appear twice in HTML when multiple parsing paths overlap.
     """
     products = _extract_next_products(page_html)
     if not products:
+        # Last resort: regex-scan for /en-us/product/UP0001-… style paths.
         products = _extract_product_links(page_html)
     results: list[SearchResult] = []
     seen: set[str] = set()
@@ -681,7 +787,11 @@ def _parse_millis_timestamp(value: object) -> datetime | None:
 
 
 def _retry_after_seconds(response: httpx.Response) -> float | None:
-    """Parse the `Retry-After` header into seconds when present."""
+    """Parse the ``Retry-After`` header into seconds when present.
+
+    Servers may send either a number of seconds *or* an HTTP-date telling us
+    when we can retry.  This helper handles both formats.
+    """
     value = response.headers.get("Retry-After")
     if not value:
         return None

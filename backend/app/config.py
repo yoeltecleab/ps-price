@@ -1,12 +1,21 @@
 """Application configuration via Pydantic Settings.
 
-This module exposes a single `Settings` model which reads configuration
-from environment variables (prefixed with PS_PRICE_) and an optional
-.env file. It centralizes defaults used across the application (database
-path, HTTP client behaviour, scheduler and SMTP settings).
+This module is the **control panel** for the whole backend. Instead of hard-
+coding paths, URLs, and secrets in many files, we read them once from:
 
-Use `get_settings()` to obtain a cached Settings instance that can be
-passed to other components (repository, service, notifier).
+  1. Environment variables starting with ``PS_PRICE_`` (e.g. ``PS_PRICE_DATABASE_PATH``)
+  2. An optional ``.env`` file in the project root (for local development)
+
+Pydantic's ``BaseSettings`` validates types automatically — if you set
+``PS_PRICE_SMTP_PORT=abc``, the app fails at startup with a clear error.
+
+Typical usage::
+
+    from backend.app.config import get_settings
+    settings = get_settings()
+    print(settings.database_path)
+
+``get_settings()`` is cached (``@lru_cache``) so we only parse the environment once.
 """
 
 from __future__ import annotations
@@ -16,30 +25,30 @@ from functools import lru_cache
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# en-us "All Deals" category (cat.gma.AllDeals) — ~4k+ sale products via GraphQL
+# ---------------------------------------------------------------------------
+# PlayStation Store GraphQL category IDs (Sony-internal identifiers)
+# ---------------------------------------------------------------------------
+# "All Deals" feed — roughly 4k+ products currently on sale.
 ALL_DEALS_CATEGORY_ID = "3f772501-f6f8-49b7-abac-874a88ca4897"
-# Full store browse grid — ~10k concepts per shard (games with and without discounts)
+# Full browse grid — ~10k games per shard (with and without discounts).
 STORE_CATALOG_GRID_ID = "28c9c2b2-cecc-415c-9a08-482a605cb104"
 
 
 class Settings(BaseSettings):
-    """Configuration values for the PS Price application.
+    """All configurable values for PS Price.
 
-    Settings are loaded from environment variables with the prefix
-    `PS_PRICE_` by default. Reasonable defaults are provided so the app
-    can run locally without additional configuration.
-
-    Important properties:
-      - `database_path`: Path to the SQLite database file.
-      - `store_origin` / `store_locale`: Base URL and default locale for the PlayStation Store client.
-      - `request_*`: HTTP client timeouts, retries and rate limiting.
-      - `smtp_*`: SMTP configuration used by `notifier.EmailNotifier`.
+    Each attribute below can be overridden via ``PS_PRICE_<NAME>`` in the
+    environment. Defaults let you run locally without editing code.
     """
 
+    # Tell Pydantic to load PS_PRICE_* vars and ignore unknown extra vars.
     model_config = SettingsConfigDict(env_prefix="PS_PRICE_", env_file=".env", extra="ignore")
 
+    # --- General app ---
     app_name: str = "PS Price"
     database_path: str = "backend/data/ps_price.sqlite3"
+
+    # --- PlayStation Store HTTP client ---
     store_origin: str = "https://store.playstation.com"
     store_locale: str = "en-us"
     user_agent: str = (
@@ -47,15 +56,20 @@ class Settings(BaseSettings):
         "+https://github.com/local/ps-price)"
     )
     request_timeout_seconds: float = 20.0
-    request_min_interval_seconds: float = 3.0
+    request_min_interval_seconds: float = 3.0  # polite delay between store requests
     search_min_interval_seconds: float = 0.4
-    cache_ttl_seconds: int = 1800
+    cache_ttl_seconds: int = 1800  # how long to reuse fetched HTML/JSON
     request_retries: int = 3
-    check_interval_minutes: int = 360
-    feed_sync_interval_minutes: int = 60
+
+    # --- Background scheduler (see scheduler.py) ---
+    check_interval_minutes: int = 360  # re-check tracked game prices
+    feed_sync_interval_minutes: int = 60  # re-download catalog/deals feeds
     scheduler_enabled: bool = True
+
+    # --- HTTP API security ---
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
+    # --- SMTP email (optional — alerts are logged as "skipped" if unset) ---
     smtp_host: str | None = None
     smtp_port: int = 587
     smtp_username: str | None = None
@@ -65,14 +79,70 @@ class Settings(BaseSettings):
     smtp_timeout_seconds: float = 15.0
     notification_from_email: str = "ps-price@example.com"
 
+    # --- Catalog / deals sync tuning ---
     max_search_limit: int = Field(default=24, ge=1, le=48)
     deals_category_id: str = ALL_DEALS_CATEGORY_ID
     catalog_category_id: str = STORE_CATALOG_GRID_ID
-    catalog_sync_shards: str = "all,PS5,PS4"
+    catalog_sync_shards: str = "all,PS5,PS4"  # comma-separated browse shards
     graphql_page_size: int = Field(default=100, ge=10, le=200)
     graphql_min_interval_seconds: float = 1.0
-    catalog_sync_max_pages: int | None = None
+    catalog_sync_max_pages: int | None = None  # None = no artificial cap
     deals_sync_max_pages: int | None = None
+
+    # --- Authentication & JWT ---
+    jwt_secret: str = "dev-only-change-me-use-ps-price-jwt-secret-in-prod"
+    jwt_algorithm: str = "HS256"
+    jwt_access_ttl_minutes: int = Field(default=30, ge=5, le=1440)
+    jwt_refresh_ttl_days: int = Field(default=30, ge=1, le=365)
+    session_ttl_days: int = Field(default=30, ge=1, le=365)  # legacy alias; prefer jwt_refresh_ttl_days
+    frontend_url: str = "http://localhost:3000"  # used in verification email links
+    webauthn_rp_id: str = "localhost"  # passkey "relying party" hostname
+    webauthn_rp_name: str = "PS Price"
+    webauthn_origin: str = "http://localhost:3000"  # must match browser origin
+    require_email_verification: bool = True
+    cookie_secure: bool = False  # set True in production (HTTPS only cookies)
+    production_mode: bool = False  # enables strict startup checks
+    admin_emails: str = ""  # comma-separated emails allowed to run manual sync
+
+    @property
+    def admin_email_list(self) -> set[str]:
+        """Parse ``admin_emails`` string into a lowercase set for fast lookup."""
+        return {
+            email.strip().lower()
+            for email in self.admin_emails.split(",")
+            if email.strip()
+        }
+
+    def validate_production_settings(self) -> None:
+        """Fail fast at startup when production mode is on but settings are unsafe.
+
+        Called from ``main.lifespan`` before the server accepts traffic.
+        Raises ``RuntimeError`` with a message telling you which env var to fix.
+        """
+        if not self.production_mode:
+            return
+        if not self.cookie_secure:
+            raise RuntimeError("PS_PRICE_COOKIE_SECURE must be true when PS_PRICE_PRODUCTION_MODE=true")
+        if self.frontend_url.startswith("http://"):
+            raise RuntimeError("PS_PRICE_FRONTEND_URL must use https in production mode")
+        if self.webauthn_rp_id in {"", "localhost"}:
+            raise RuntimeError("PS_PRICE_WEBAUTHN_RP_ID must be set to your domain in production mode")
+        if "localhost" in self.webauthn_origin:
+            raise RuntimeError("PS_PRICE_WEBAUTHN_ORIGIN must not use localhost in production mode")
+        if not self.admin_email_list:
+            raise RuntimeError("PS_PRICE_ADMIN_EMAILS must list at least one admin email in production mode")
+        if (
+            not self.jwt_secret
+            or self.jwt_secret == "dev-only-change-me-use-ps-price-jwt-secret-in-prod"
+            or len(self.jwt_secret) < 32
+        ):
+            raise RuntimeError(
+                "PS_PRICE_JWT_SECRET must be set to a random string of at least 32 characters in production mode"
+            )
+
+    @property
+    def webauthn_origin_list(self) -> list[str]:
+        return [origin.strip() for origin in self.webauthn_origin.split(",") if origin.strip()]
 
     @property
     def catalog_sync_shard_list(self) -> list[str]:

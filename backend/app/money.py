@@ -1,8 +1,28 @@
 """Utilities for parsing and formatting monetary values.
 
-This module contains helpers to convert a variety of price strings
-(localized formatting, decimals, and textual values like "Free") into
-integer cents and to format cents back into simple display strings.
+**Why store prices as integer cents?**
+
+Floating-point numbers (``19.99`` as a ``float``) can introduce tiny rounding
+errors.  Storing **cents** as integers (``1999``) keeps comparisons exact —
+critical when deciding if a price dropped below a user's target.
+
+**What ``money_to_cents`` handles**
+
+Real-world price strings are messy:
+
+- ``"$19.99"`` — currency symbol + decimals
+- ``"19,99 €"`` — European comma decimal separator
+- ``"1.299,00"`` — thousands dot + decimal comma
+- ``"Free"`` / ``"Included"`` — treated as zero cents
+
+The function uses ``Decimal`` (not ``float``) for accurate arithmetic when
+multiplying by 100.
+
+**``format_cents``**
+
+The reverse operation for display — turns ``1999`` + ``"USD"`` into
+``"$19.99"``.  We use a small prefix map instead of a full i18n library to
+keep the project lightweight.
 """
 
 from __future__ import annotations
@@ -11,6 +31,7 @@ import re
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 
+# Words that mean "zero dollars" in store UIs.
 ZERO_PRICE_WORDS = {"free", "included"}
 
 
@@ -24,6 +45,7 @@ def money_to_cents(value: object) -> int | None:
     """
     if value is None:
         return None
+    # bool is a subclass of int in Python — exclude it explicitly.
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
@@ -41,11 +63,13 @@ def money_to_cents(value: object) -> int | None:
     if normalized.casefold() in ZERO_PRICE_WORDS:
         return 0
 
+    # Regex finds the first number-like substring in the text.
     match = re.search(r"[-+]?\d[\d\s,]*(?:[.,]\d{1,2})?", normalized)
     if not match:
         return None
 
     number = match.group(0).replace(" ", "")
+    # Disambiguate 1,234.56 (US) vs 1.234,56 (EU) by looking at the last separator.
     if "," in number and "." in number:
         if number.rfind(",") > number.rfind("."):
             number = number.replace(".", "").replace(",", ".")
@@ -56,6 +80,7 @@ def money_to_cents(value: object) -> int | None:
         number = f"{integer}.{decimal}" if len(decimal) in (1, 2) else number.replace(",", "")
 
     try:
+        # quantize(..., ROUND_HALF_UP) matches common retail rounding rules.
         return int((Decimal(number) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
     except InvalidOperation:
         return None
@@ -73,6 +98,7 @@ def format_cents(cents: int | None, currency: str | None) -> str | None:
     if cents == 0:
         return "Free"
     amount = Decimal(cents) / Decimal(100)
+    # Lightweight currency symbol map — not a full locale-aware formatter.
     prefix = {
         "USD": "$",
         "CAD": "CA$",
@@ -112,7 +138,11 @@ def currency_for_locale(locale: str) -> str | None:
 
 
 def discount_percent(current_cents: int | None, original_cents: int | None) -> int | None:
-    """Return integer discount percentage when original price exceeds current."""
+    """Return integer discount percentage when original price exceeds current.
+
+    Example: was 4000¢ ($40), now 2000¢ ($20) → ``50`` percent off.
+    Returns ``None`` when there is no meaningful discount to show.
+    """
     if current_cents is None or original_cents is None or original_cents <= current_cents:
         return None
     return int(round((original_cents - current_cents) / original_cents * 100))

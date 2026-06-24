@@ -13,6 +13,7 @@ import { BulkActionBar } from "@/components/BulkActionBar";
 import { Button } from "@/components/Button";
 import { Skeleton } from "@/components/Skeleton";
 import { useTheme } from "@/components/ThemeProvider";
+import { useAuth } from "@/lib/auth";
 
 const defaultFilters: DealFilters = {
   q: "",
@@ -26,6 +27,7 @@ const defaultFilters: DealFilters = {
 
 export default function DealsHomePage() {
   const { theme } = useTheme();
+  const { requireVerified, notificationEmails, user } = useAuth();
   const [filters, setFilters] = useState<DealFilters>(defaultFilters);
   const [data, setData] = useState<DealsPage | null>(null);
   const [loading, setLoading] = useState(true);
@@ -126,6 +128,7 @@ export default function DealsHomePage() {
   }
 
   async function handleTrack(gameId: number) {
+    if (!requireVerified()) return;
     setTrackingId(gameId);
     try {
       await api(`/api/games/${gameId}/track`, { method: "POST" });
@@ -156,6 +159,7 @@ export default function DealsHomePage() {
   }
 
   async function handleBulkLibrary() {
+    if (!requireVerified()) return;
     const ids = Array.from(selected);
     if (!ids.length) return;
     setBulkLibraryLoading(true);
@@ -182,16 +186,17 @@ export default function DealsHomePage() {
     }
   }
 
-  async function handleBulkWatch(email: string) {
+  async function handleBulkWatch(notificationEmailId: number) {
+    if (!requireVerified()) return;
     const ids = Array.from(selected);
-    if (!ids.length || !email) return;
+    if (!ids.length || !notificationEmailId) return;
     setBulkWatchLoading(true);
     try {
       await api("/api/watches/bulk", {
         method: "POST",
         body: JSON.stringify({
           game_ids: ids,
-          email,
+          notification_email_id: notificationEmailId,
           notify_on_any_drop: true,
           enabled: true,
           theme_id: theme,
@@ -294,10 +299,12 @@ export default function DealsHomePage() {
           transition={{ delay: 0.3 }}
           className="mt-6 flex flex-wrap items-center gap-3"
         >
-          <Button onClick={handleSync} loading={syncing} size="lg">
-            <ArrowsClockwise className="size-4" weight="bold" />
-            {syncing ? "Syncing catalog…" : "Sync PlayStation catalog"}
-          </Button>
+          {user?.is_admin ? (
+            <Button onClick={handleSync} loading={syncing} size="lg">
+              <ArrowsClockwise className="size-4" weight="bold" />
+              {syncing ? "Syncing catalog…" : "Sync PlayStation catalog"}
+            </Button>
+          ) : null}
           {data?.last_sync ? (
             <span className="font-data text-xs text-muted flex items-center gap-1.5">
               <Lightning weight="fill" className="size-3.5 text-accent" />
@@ -356,11 +363,16 @@ export default function DealsHomePage() {
         <div className="text-center py-24 holo-panel-strong rounded-[var(--radius-xl)]">
           <p className="font-display text-2xl font-bold text-ink">Signal lost</p>
           <p className="mt-3 text-muted max-w-sm mx-auto text-pretty">
-            No games match your filters. Sync the catalog or widen your search.
+            No games match your filters.{" "}
+            {user?.is_admin
+              ? "Sync the catalog or widen your search."
+              : "Widen your search or wait for the scheduled catalog sync."}
           </p>
-          <Button className="mt-8" size="lg" onClick={handleSync} loading={syncing}>
-            Initialize feed
-          </Button>
+          {user?.is_admin ? (
+            <Button className="mt-8" size="lg" onClick={handleSync} loading={syncing}>
+              Initialize feed
+            </Button>
+          ) : null}
         </div>
       ) : (
         <>
@@ -389,6 +401,7 @@ export default function DealsHomePage() {
             onDeployWatch={handleBulkWatch}
             libraryLoading={bulkLibraryLoading}
             watchLoading={bulkWatchLoading}
+            notificationEmails={notificationEmails}
           />
 
           {data && data.total > limit ? (

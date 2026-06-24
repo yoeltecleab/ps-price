@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inconsolata, JetBrains_Mono } from "next/font/google";
 import { AppShell } from "@/components/AppShell";
 import { ThemeProvider } from "@/components/ThemeProvider";
+import { AuthProvider } from "@/lib/auth";
 import "./globals.css";
 
 const inconsolata = Inconsolata({
@@ -38,7 +39,9 @@ export default function RootLayout({
     >
       <body className="min-h-dvh antialiased">
         <ThemeProvider>
-          <AppShell>{children}</AppShell>
+          <AuthProvider>
+            <AppShell>{children}</AppShell>
+          </AuthProvider>
         </ThemeProvider>
       </body>
     </html>

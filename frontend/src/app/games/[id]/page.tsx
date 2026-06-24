@@ -23,6 +23,7 @@ import { Input } from "@/components/Input";
 import { GameCardSkeleton } from "@/components/Skeleton";
 import { ConfettiBurst } from "@/components/ConfettiBurst";
 import { useTheme } from "@/components/ThemeProvider";
+import { useAuth, useVerifiedEmails } from "@/lib/auth";
 
 export default function GameDetailPage({
   params,
@@ -30,6 +31,8 @@ export default function GameDetailPage({
   params: Promise<{ id: string }>;
 }) {
   const { theme } = useTheme();
+  const { requireVerified } = useAuth();
+  const verifiedEmails = useVerifiedEmails();
   const { id: idStr } = use(params);
   const gameId = Number(idStr);
   const [game, setGame] = useState<GameDetail | null>(null);
@@ -37,7 +40,7 @@ export default function GameDetailPage({
   const [refreshing, setRefreshing] = useState(false);
   const [tracking, setTracking] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [email, setEmail] = useState("");
+  const [notificationEmailId, setNotificationEmailId] = useState<number | "">("");
   const [targetPrice, setTargetPrice] = useState("");
   const [notifyAnyDrop, setNotifyAnyDrop] = useState(true);
   const [creatingWatch, setCreatingWatch] = useState(false);
@@ -73,7 +76,13 @@ export default function GameDetailPage({
     }
   }
 
+  useEffect(() => {
+    const primary = verifiedEmails.find((e) => e.is_primary) ?? verifiedEmails[0];
+    if (primary) setNotificationEmailId(primary.id);
+  }, [verifiedEmails]);
+
   async function handleAddToLibrary() {
+    if (!requireVerified()) return;
     if (!gameId) return;
     setTracking(true);
     try {
@@ -88,7 +97,8 @@ export default function GameDetailPage({
 
   async function handleCreateWatch(e: React.FormEvent) {
     e.preventDefault();
-    if (!gameId || !email.trim()) return;
+    if (!requireVerified()) return;
+    if (!gameId || !notificationEmailId) return;
     setCreatingWatch(true);
     setWatchSuccess(false);
     try {
@@ -100,7 +110,7 @@ export default function GameDetailPage({
         method: "POST",
         body: JSON.stringify({
           game_id: gameId,
-          email: email.trim(),
+          notification_email_id: notificationEmailId,
           target_price_cents: cents,
           notify_on_any_drop: notifyAnyDrop,
           enabled: true,
@@ -320,14 +330,33 @@ export default function GameDetailPage({
             </p>
 
             <form onSubmit={handleCreateWatch} className="mt-6 flex flex-col gap-4">
-              <Input
-                label="Email"
-                type="email"
-                required
-                placeholder="you@example.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-              />
+              {verifiedEmails.length ? (
+                <label className="block">
+                  <span className="font-data text-xs uppercase tracking-wider text-muted mb-2 block">
+                    Notification email
+                  </span>
+                  <select
+                    value={notificationEmailId}
+                    onChange={(e) => setNotificationEmailId(Number(e.target.value))}
+                    className="h-10 w-full rounded-[var(--radius-sm)] holo-panel px-3 font-data text-sm text-ink"
+                    required
+                  >
+                    {verifiedEmails.map((row) => (
+                      <option key={row.id} value={row.id}>
+                        {row.label ? `${row.label} · ` : ""}
+                        {row.email}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <p className="text-sm text-muted">
+                  <Link href="/account" className="text-accent hover:underline">
+                    Add a verified notification email
+                  </Link>{" "}
+                  to deploy watches.
+                </p>
+              )}
               <Input
                 label="Target price (optional)"
                 type="text"

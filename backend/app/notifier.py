@@ -1,4 +1,31 @@
-"""Email notification helper that records notifications in the database."""
+"""Email notification helper that records notifications in the database.
+
+**What this module does**
+
+When a tracked game's price drops, users want an email alert.  This module:
+
+1. Builds **subject**, **plain-text**, and **HTML** email bodies.
+2. Sends mail through **SMTP** (the standard internet protocol for email).
+3. **Logs every attempt** in the ``notifications`` table — sent, failed, or
+   skipped — so the UI can show history even when SMTP is not configured.
+
+**Why ``asyncio.to_thread`` for email?**
+
+Python's ``smtplib`` is **blocking** — while it talks to the mail server,
+nothing else on that thread can run.  FastAPI is **async**, so we offload
+the blocking SMTP work to a background thread via ``asyncio.to_thread`` and
+``await`` its completion without freezing the web server.
+
+**Email structure**
+
+An email can have multiple "parts":
+
+- ``text/plain`` — readable in any mail client.
+- ``text/html`` — styled version (tables, colors) for modern clients.
+
+``EmailMessage.set_content`` sets the plain part; ``add_alternative`` adds
+the HTML part as a sibling MIME alternative.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +39,17 @@ from backend.app.repository import Repository
 
 
 class EmailNotifier:
-    """Send email notifications for watch events and log outcomes."""
+    """Send email notifications for watch events and log outcomes.
+
+    Dependencies:
+
+    - ``settings`` — SMTP host/port/credentials (from environment variables).
+    - ``repo`` — database access to persist notification audit rows.
+
+    If SMTP is not configured (``smtp_configured`` is False), we still log a
+    ``skipped`` notification so developers can test price logic locally without
+    sending real mail.
+    """
 
     def __init__(self, settings: Settings, repo: Repository):
         self.settings = settings
@@ -20,6 +57,7 @@ class EmailNotifier:
 
     @property
     def configured(self) -> bool:
+        """True when SMTP host and from-address are set in config."""
         return self.settings.smtp_configured
 
     async def send_price_notification(
@@ -31,6 +69,17 @@ class EmailNotifier:
         test: bool = False,
         theme_id: str | None = None,
     ) -> dict:
+        """Send (or skip) a price-drop email and return the log row.
+
+        ``watch`` and ``game`` are plain dicts from the repository layer
+        (SQLite rows converted via ``row_to_dict``).
+
+        Flow:
+            build messages → if SMTP missing: log skipped
+                          → else: await thread SMTP send
+                          → log sent/failed
+                          → mark watch as notified (unless test)
+        """
         subject = self._subject(game, reason, test)
         text_body = self._body(watch, game, reason, previous_price_cents, test)
         html_body = self._html_body(
@@ -46,9 +95,11 @@ class EmailNotifier:
                 "skipped",
                 reason,
                 "SMTP is not configured",
+                user_id=watch.get("user_id"),
             )
 
         try:
+            # Run blocking SMTP in a worker thread; await returns to async world.
             await asyncio.to_thread(
                 self._send_sync, watch["email"], subject, text_body, html_body
             )
@@ -62,18 +113,87 @@ class EmailNotifier:
                 "failed",
                 reason,
                 str(exc)[:1000],
+                user_id=watch.get("user_id"),
             )
 
         notification = self.repo.log_notification(
-            watch.get("id"), game.get("id"), watch["email"], subject, text_body, "sent", reason
+            watch.get("id"),
+            game.get("id"),
+            watch["email"],
+            subject,
+            text_body,
+            "sent",
+            reason,
+            user_id=watch.get("user_id"),
         )
         if not test:
+            # Remember last notified price so we do not spam the same drop.
             self.repo.mark_watch_notified(watch["id"], game.get("current_price_cents"))
         return notification
+
+    async def send_system_email(
+        self,
+        to_email: str,
+        subject: str,
+        text_body: str,
+        *,
+        html_body: str | None = None,
+        user_id: int | None = None,
+    ) -> dict:
+        """Send operational mail (verification links, password reset, etc.).
+
+        Same SMTP + logging pattern as ``send_price_notification``, but not
+        tied to a specific game/watch row.
+        """
+        if not self.configured:
+            return self.repo.log_notification(
+                None,
+                None,
+                to_email,
+                subject,
+                text_body,
+                "skipped",
+                "system",
+                "SMTP is not configured",
+                user_id=user_id,
+            )
+        try:
+            await asyncio.to_thread(
+                self._send_sync,
+                to_email,
+                subject,
+                text_body,
+                html_body or f"<pre>{text_body}</pre>",
+            )
+        except Exception as exc:  # pragma: no cover
+            return self.repo.log_notification(
+                None,
+                None,
+                to_email,
+                subject,
+                text_body,
+                "failed",
+                "system",
+                str(exc)[:1000],
+                user_id=user_id,
+            )
+        return self.repo.log_notification(
+            None, None, to_email, subject, text_body, "sent", "system", user_id=user_id
+        )
 
     def _send_sync(
         self, to_email: str, subject: str, text_body: str, html_body: str
     ) -> None:
+        """Blocking SMTP send — must run in a thread, not on the event loop.
+
+        Steps mirror what any mail client does under the hood:
+
+        1. Build a MIME message with headers (From, To, Subject).
+        2. Connect to the SMTP server (plain or SSL).
+        3. Optionally upgrade with STARTTLS.
+        4. Authenticate if username/password provided.
+        5. ``send_message`` transmits the email.
+        """
         msg = EmailMessage()
         msg["From"] = self.settings.notification_from_email
         msg["To"] = to_email
@@ -81,6 +201,7 @@ class EmailNotifier:
         msg.set_content(text_body)
         msg.add_alternative(html_body, subtype="html")
 
+        # SMTP_SSL = encrypted from the first byte; SMTP + starttls = upgrade later.
         smtp_cls = smtplib.SMTP_SSL if self.settings.smtp_use_ssl else smtplib.SMTP
         with smtp_cls(
             self.settings.smtp_host,
@@ -94,6 +215,7 @@ class EmailNotifier:
             smtp.send_message(msg)
 
     def _subject(self, game: dict, reason: str, test: bool) -> str:
+        """One-line inbox subject summarizing the alert."""
         prefix = "[PS Price test]" if test else "[PS Price]"
         price = game.get("current_price_formatted") or "price unavailable"
         return f"{prefix} {game.get('name', 'Tracked game')} is {price}"
@@ -106,6 +228,7 @@ class EmailNotifier:
         previous_price_cents: int | None,
         test: bool,
     ) -> str:
+        """Plain-text body — works in terminal mail readers and as fallback."""
         lines = [
             "This is a test notification." if test else "A tracked PlayStation Store price matched your watch.",
             "",
@@ -131,6 +254,11 @@ class EmailNotifier:
         test: bool,
         theme_id: str | None,
     ) -> str:
+        """HTML body with inline CSS (email clients ignore external stylesheets).
+
+        We build the HTML as an f-string template.  ``palette_for`` picks
+        colors based on the user's chosen email theme.
+        """
         palette = palette_for(theme_id)
         headline = "Test alert" if test else "Price watch triggered"
         subline = (

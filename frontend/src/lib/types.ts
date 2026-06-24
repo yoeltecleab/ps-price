@@ -142,3 +142,27 @@ export interface DealFilters {
   sortDir: SortDirection;
   onSaleOnly: boolean;
 }
+
+export interface AuthUser {
+  id: number;
+  email: string;
+  display_name: string | null;
+  email_verified: boolean;
+  has_password: boolean;
+  is_admin: boolean;
+}
+
+export interface NotificationEmail {
+  id: number;
+  email: string;
+  label: string | null;
+  verified: boolean;
+  is_primary: boolean;
+  created_at: string;
+}
+
+export interface MeResponse {
+  user: AuthUser;
+  notification_emails: NotificationEmail[];
+  passkeys: { id: number; friendly_name: string | null; created_at: string }[];
+}

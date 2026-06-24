@@ -10,9 +10,11 @@ import { EmptyState } from "@/components/EmptyState";
 import { BulkActionBar } from "@/components/BulkActionBar";
 import { Button } from "@/components/Button";
 import { useTheme } from "@/components/ThemeProvider";
+import { useAuth } from "@/lib/auth";
 
 export default function LibraryPage() {
   const { theme } = useTheme();
+  const { requireVerified, notificationEmails } = useAuth();
   const [games, setGames] = useState<Game[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -71,16 +73,17 @@ export default function LibraryPage() {
     });
   }
 
-  async function handleBulkWatch(email: string) {
+  async function handleBulkWatch(notificationEmailId: number) {
+    if (!requireVerified("/library")) return;
     const ids = Array.from(selected);
-    if (!ids.length || !email) return;
+    if (!ids.length || !notificationEmailId) return;
     setBulkWatchLoading(true);
     try {
       await api("/api/watches/bulk", {
         method: "POST",
         body: JSON.stringify({
           game_ids: ids,
-          email,
+          notification_email_id: notificationEmailId,
           notify_on_any_drop: true,
           enabled: true,
           theme_id: theme,
@@ -151,6 +154,7 @@ export default function LibraryPage() {
             showLibrary={false}
             onDeployWatch={handleBulkWatch}
             watchLoading={bulkWatchLoading}
+            notificationEmails={notificationEmails}
           />
         </>
       )}

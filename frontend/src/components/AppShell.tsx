@@ -7,6 +7,7 @@ import { motion } from "motion/react";
 import { GlobalSearch } from "./GlobalSearch";
 import { Scene } from "./Scene";
 import { SettingsDrawer } from "./SettingsDrawer";
+import { AuthMenu } from "./AuthMenu";
 import { KeyboardHelp } from "./KeyboardHelp";
 import Image from "next/image";
 
@@ -50,6 +51,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </div>
 
             <div className="flex items-center gap-2 shrink-0">
+              <AuthMenu />
               <SettingsDrawer />
             </div>
           </div>

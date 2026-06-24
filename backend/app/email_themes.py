@@ -1,7 +1,20 @@
-"""Theme color palettes for HTML notification emails."""
+"""Theme color palettes for HTML notification emails.
+
+Price-drop emails are HTML (not plain text) so they can look nice in inbox
+apps. Users can pick a theme on their watch; this module maps theme **ids**
+(e.g. ``"abyss"``) to hex color codes used in the email template built by
+``notifier.py``.
+
+Each palette has the same keys:
+  - bg, surface — page and card backgrounds
+  - ink, muted  — primary and secondary text
+  - primary, accent — links and highlights
+  - border — dividers
+"""
 
 from __future__ import annotations
 
+# All available themes. Keys are stored on watches as ``theme_id``.
 THEME_PALETTES: dict[str, dict[str, str]] = {
     "abyss": {
         "bg": "#020308",
@@ -63,6 +76,7 @@ DEFAULT_THEME_ID = "abyss"
 
 
 def palette_for(theme_id: str | None) -> dict[str, str]:
+    """Return the color dict for ``theme_id``, or the default theme if unknown."""
     if theme_id and theme_id in THEME_PALETTES:
         return THEME_PALETTES[theme_id]
     return THEME_PALETTES[DEFAULT_THEME_ID]

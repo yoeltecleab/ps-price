@@ -469,8 +469,10 @@ docker cp ps-price-backend:/data/backup.sqlite3 ~/ps-price-backup-$(date +%Y%m%d
 
 ## 21. Security checklist
 
+### Infrastructure
+
 - [ ] `.env` permissions: `chmod 600 .env`
-- [ ] `PS_PRICE_CORS_ORIGINS` matches your real public URL
+- [ ] `PS_PRICE_CORS_ORIGINS` matches your real public URL (HTTPS, no trailing slash)
 - [ ] Ports **3000** and **8000** are **not** in the Security Group
 - [ ] SSH restricted to **My IP** (not `0.0.0.0/0`)
 - [ ] Billing alert configured
@@ -481,6 +483,43 @@ docker cp ps-price-backend:/data/backup.sqlite3 ~/ps-price-backup-$(date +%Y%m%d
   sudo ufw allow 443
   sudo ufw enable
   ```
+
+### Application (required for production)
+
+Set these in `.env` on the server:
+
+```env
+PS_PRICE_PRODUCTION_MODE=true
+PS_PRICE_COOKIE_SECURE=true
+PS_PRICE_FRONTEND_URL=https://your-domain.com
+PS_PRICE_WEBAUTHN_RP_ID=your-domain.com
+PS_PRICE_WEBAUTHN_ORIGIN=https://your-domain.com
+PS_PRICE_ADMIN_EMAILS=you@your-domain.com
+PS_PRICE_JWT_SECRET=replace-with-openssl-rand-hex-32-or-longer-random-string
+PS_PRICE_JWT_ACCESS_TTL_MINUTES=30
+PS_PRICE_JWT_REFRESH_TTL_DAYS=30
+PS_PRICE_REQUIRE_EMAIL_VERIFICATION=true
+PS_PRICE_CORS_ORIGINS=https://your-domain.com
+```
+
+- [ ] `PS_PRICE_PRODUCTION_MODE=true` — enforces secure cookies, HTTPS frontend URL, WebAuthn RP ID, and at least one admin email at startup
+- [ ] `PS_PRICE_COOKIE_SECURE=true` — JWT cookies only sent over HTTPS
+- [ ] `PS_PRICE_JWT_SECRET` — random string ≥32 chars (`openssl rand -hex 32`)
+- [ ] `PS_PRICE_ADMIN_EMAILS` — comma-separated verified account emails allowed to run manual catalog sync (`POST /api/sync-deals`) and scheduler refresh
+- [ ] `PS_PRICE_WEBAUTHN_RP_ID` matches your public hostname (no port, no scheme)
+- [ ] `PS_PRICE_WEBAUTHN_ORIGIN` matches the browser origin users sign in from
+- [ ] SMTP configured for account verification, password reset, and price alerts
+- [ ] Manual sync from the UI is **admin-only**; regular users rely on the backend scheduler
+
+### Auth & abuse controls (built in)
+
+- Argon2 password hashing
+- JWT auth: short-lived access token + refresh token in HttpOnly cookies (`SameSite=lax`)
+- Optional `Authorization: Bearer` header for API clients
+- Rate limits on register, login, forgot-password, resend-verification, and notification-email verification
+- Open-redirect protection on auth `next` parameters
+- Security headers (`X-Frame-Options`, `HSTS` when production mode is on)
+- `GET /healthz` returns minimal public status (no internal paths)
 
 ---
 
@@ -503,7 +542,7 @@ docker compose -f docker-compose.yml -f docker-compose.aws.yml logs caddy
 | Connection refused on 80/443 | Security Group | Revisit Step 6 |
 | 502 from Caddy | Frontend not ready | Wait; check `frontend` and `backend` logs |
 | CORS errors in browser | Wrong `PS_PRICE_CORS_ORIGINS` | Match exact public URL in `.env`, restart backend |
-| Empty deals / search | Catalog not synced | `curl -X POST http://localhost/api/sync-deals` |
+| Empty deals / search | Catalog not synced | Wait for scheduler, or as admin: `curl -X POST -b cookies.txt http://localhost/api/sync-deals` |
 | Caddy TLS failure | DNS not pointing at server | Fix A record; wait for propagation |
 | Emails `skipped` | SMTP not configured | Set SES vars in `.env` |
 | Data lost | Used `docker compose down -v` | Restore from backup; never use `-v` |

@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: ps-price
+Version: 0.1.0
+Summary: Backend API for tracking PlayStation Store prices.
+Requires-Python: >=3.14
+Requires-Dist: fastapi<1.0,>=0.115
+Requires-Dist: httpx<1.0,>=0.28
+Requires-Dist: pydantic-settings<3.0,>=2.7
+Requires-Dist: uvicorn[standard]<1.0,>=0.34
+Provides-Extra: test
+Requires-Dist: pytest<10,>=9; extra == "test"

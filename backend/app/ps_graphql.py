@@ -1,8 +1,42 @@
 """PlayStation Store GraphQL client for catalog and deal listings.
 
-The public GraphQL API at web.np.playstation.com exposes paginated
-category grids with thousands of products — far more than SSR HTML pages
-surface (typically ~12–24 items).
+**What is GraphQL?**
+
+REST APIs often have many URLs (``/games``, ``/games/123``, …).  **GraphQL**
+uses a single endpoint and lets the client describe *exactly* what data
+shape it wants in one request.  The PlayStation Store web app uses GraphQL
+behind the scenes to load big product grids.
+
+**Why we use GraphQL here**
+
+A normal HTML search/deals page only shows ~12–24 items (server-side
+rendered).  Sony's public GraphQL API at ``web.np.playstation.com`` can
+return **thousands** of products when we paginate with ``offset`` and
+``page_size``.
+
+**Persisted queries**
+
+Instead of sending the full GraphQL query text every time, the client sends
+a **SHA-256 hash** of a known query (``graphql_hash``).  The server already
+has the query on file — this saves bandwidth and is a common production
+pattern.
+
+**Pagination loop**
+
+``fetch_category_products`` repeats until ``pageInfo.isLast`` is true:
+
+1. Build URL query params: ``operationName``, ``variables`` (JSON),
+   ``extensions`` (hash).
+2. ``GET`` the GraphQL endpoint (yes — this API uses HTTP GET).
+3. Parse ``products`` or ``concepts`` arrays from the JSON response.
+4. Increase ``offset`` by ``page_size`` and sleep ``min_interval`` seconds
+   between pages to be polite.
+
+**Concept vs Product nodes**
+
+Browse grids return **Concepts** (a game idea) that may contain nested
+**Products** (specific SKUs/editions).  ``parse_graphql_concept`` picks the
+first valid product ID and merges concept-level media/price when needed.
 """
 
 from __future__ import annotations
@@ -17,8 +51,10 @@ from backend.app.domain import SearchResult
 from backend.app.money import currency_for_locale, money_to_cents
 from backend.app.ps_store import _select_image, product_url
 
+# Base URL for all GraphQL operations (GET requests with query params).
 GRAPHQL_URL = "https://web.np.playstation.com/api/graphql/v1/op"
 
+# --- Persisted query hashes (fingerprints of pre-registered GraphQL queries) ---
 # Deals grid — flat `products` array (~4.5k sale items en-us)
 DEALS_GRID_HASH = "9845afc0dbaab4965f6563fffc703f588c8e76792000e8610843b8d3ee9c4c09"
 ALL_DEALS_CATEGORY_ID = "3f772501-f6f8-49b7-abac-874a88ca4897"
@@ -26,6 +62,7 @@ ALL_DEALS_CATEGORY_ID = "3f772501-f6f8-49b7-abac-874a88ca4897"
 # Full store browse grid — `concepts` array (games with and without discounts)
 STORE_CATALOG_GRID_ID = "28c9c2b2-cecc-415c-9a08-482a605cb104"
 STORE_CATALOG_GRID_HASH = "4e41660b6732f35c99fc5541926b7502a09557924e8c2cfebd1beb1a5c8c8f81"
+# Facets tell the API which filter metadata to include alongside results.
 STORE_CATALOG_FACETS = [
     "targetPlatforms",
     "productGenres",
@@ -43,10 +80,18 @@ LOCALE_ACCEPT_LANGUAGE = {
 
 
 class GraphQLClientError(RuntimeError):
-    """Raised when the PlayStation GraphQL API returns errors."""
+    """Raised when the PlayStation GraphQL API returns errors.
+
+    GraphQL responses can be HTTP 200 OK but still contain an ``errors``
+    array in the JSON body — we treat that as a hard failure.
+    """
 
 
 def locale_accept_language(locale: str) -> str:
+    """Map a store locale to an HTTP ``Accept-Language`` header value.
+
+    Servers may return localized price strings based on this header.
+    """
     return LOCALE_ACCEPT_LANGUAGE.get(locale.lower(), "en-US,en;q=0.9")
 
 
@@ -66,7 +111,11 @@ def parse_graphql_product(
     popularity_rank: int | None = None,
     name_override: str | None = None,
 ) -> SearchResult | None:
-    """Convert a GraphQL Product node into a SearchResult."""
+    """Convert a GraphQL Product node into a SearchResult.
+
+    Returns ``None`` (instead of raising) when required fields are missing —
+    a single bad row should not abort an entire catalog sync.
+    """
     product_id = product.get("id")
     name = name_override or product.get("name")
     if not isinstance(product_id, str) or not product_id or not isinstance(name, str) or not name:
@@ -106,7 +155,13 @@ def parse_graphql_concept(
     *,
     popularity_rank: int | None = None,
 ) -> SearchResult | None:
-    """Convert a browse-grid Concept node into a SearchResult."""
+    """Convert a browse-grid Concept node into a SearchResult.
+
+    A **Concept** is the marketing wrapper (title, artwork).  It contains one
+    or more **Product** entries (Standard Edition, Deluxe, etc.).  We pick the
+    first product with a valid ``id`` and merge concept-level fields when the
+    product object is incomplete.
+    """
     name = concept.get("name")
     if not isinstance(name, str) or not name.strip():
         return None
@@ -154,14 +209,25 @@ async def fetch_category_products(
     facet_options: list[str] | None = None,
     on_page: Callable[[dict[str, Any]], None] | None = None,
 ) -> list[SearchResult]:
-    """Paginate a categoryGridRetrieve query until all products are fetched."""
+    """Paginate a categoryGridRetrieve query until all products are fetched.
+
+    This is the core GraphQL pagination loop:
+
+    - ``offset`` = how many items to skip (0, page_size, 2*page_size, …)
+    - ``page_size`` = how many items per request (often 100)
+    - ``max_pages`` = optional safety cap for testing/dev
+    - ``on_page`` = optional callback so callers can log progress
+
+    The ``sort_by is ...`` sentinel (Ellipsis) lets callers pass ``None``
+    explicitly to disable sorting while still using the default otherwise.
+    """
     import asyncio
 
     if sort_by is ...:
         sort_by = {"name": "sales30", "isAscending": False}
 
     results: list[SearchResult] = []
-    seen: set[str] = set()
+    seen: set[str] = set()  # dedupe by product_id across pages
     offset = 0
     page_index = 0
 
@@ -169,6 +235,7 @@ async def fetch_category_products(
         if max_pages is not None and page_index >= max_pages:
             break
 
+        # GraphQL variables are serialized to compact JSON for the URL.
         variables: dict[str, Any] = {
             "id": category_id,
             "pageArgs": {"size": page_size, "offset": offset},
@@ -190,6 +257,7 @@ async def fetch_category_products(
             ),
         }
         url = f"{GRAPHQL_URL}?{urlencode(params)}"
+        # Reuse the httpx.AsyncClient passed in from PlayStationStoreClient.
         response = await client.get(
             url,
             headers={
@@ -253,6 +321,7 @@ async def fetch_category_products(
 
         offset += page_size
         page_index += 1
+        # Pause between pages — same politeness idea as ps_store rate limiting.
         if min_interval > 0:
             await asyncio.sleep(min_interval)
 
@@ -270,7 +339,17 @@ async def fetch_store_catalog(
     min_interval: float = 1.0,
     deals_category_id: str = ALL_DEALS_CATEGORY_ID,
 ) -> list[SearchResult]:
-    """Fetch the full PS Store catalog (all games) plus deal pricing overlay."""
+    """Fetch the full PS Store catalog (all games) plus deal pricing overlay.
+
+    Strategy (two-pass merge):
+
+    1. For each **shard** (e.g. PS5, PS4, or "all"), download the browse
+       grid and store rows in a dict keyed by ``product_id``.
+    2. Download the **deals** grid and overwrite matching IDs — deal rows
+       carry fresher sale pricing.
+
+    Using a dict means later rows automatically update earlier ones.
+    """
     merged: dict[str, SearchResult] = {}
 
     for shard in shards:
@@ -307,6 +386,7 @@ async def fetch_store_catalog(
 
 
 def _first_str(*values: object) -> str | None:
+    """Return the first non-empty string from ``values`` (helper for parsing)."""
     for value in values:
         if isinstance(value, str):
             cleaned = value.strip()

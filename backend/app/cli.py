@@ -1,8 +1,12 @@
 """Small CLI utility for ad-hoc fetching and searching of the PlayStation Store.
 
-This script can be executed directly to inspect live store data without
-running the full API. Output is JSON-encoded using a small helper that
-converts dataclasses and datetimes into serializable forms.
+Run from the project root (with dependencies installed)::
+
+    python -m backend.app.cli fetch UP0001-CUSA00001_00-EXAMPLEID
+    python -m backend.app.cli search "god of war" --limit 5
+
+This bypasses the web API and database — useful when debugging parsers in
+``ps_store.py`` without starting FastAPI or the frontend.
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ from backend.app.ps_store import PlayStationStoreClient
 
 
 def _json_default(value):
-    """JSON default serializer for dataclasses and datetimes."""
+    """Teach ``json.dumps`` how to serialize dataclasses and datetimes."""
     if is_dataclass(value):
         return asdict(value)
     if hasattr(value, "isoformat"):
@@ -26,16 +30,19 @@ def _json_default(value):
 
 
 async def _run() -> None:
-    """Parse CLI args and run the requested subcommand (fetch or search)."""
+    """Parse command-line arguments and run fetch or search."""
     parser = argparse.ArgumentParser(description="PlayStation Store live data helper")
     sub = parser.add_subparsers(dest="command", required=True)
-    fetch = sub.add_parser("fetch")
-    fetch.add_argument("product_ref")
-    fetch.add_argument("--locale", default=None)
-    search = sub.add_parser("search")
+
+    fetch = sub.add_parser("fetch", help="Download one product by ID or URL")
+    fetch.add_argument("product_ref", help="Product ID or store URL")
+    fetch.add_argument("--locale", default=None, help="e.g. en-us")
+
+    search = sub.add_parser("search", help="Search the store by keyword")
     search.add_argument("query")
     search.add_argument("--locale", default=None)
     search.add_argument("--limit", type=int, default=5)
+
     args = parser.parse_args()
 
     client = PlayStationStoreClient(get_settings())
@@ -50,7 +57,7 @@ async def _run() -> None:
 
 
 def main() -> None:
-    """Entry point for the CLI; runs the async runner."""
+    """Synchronous entry point — ``asyncio.run`` starts the async event loop."""
     asyncio.run(_run())
 
 

@@ -1,10 +1,29 @@
 """Domain models used throughout the PS Price backend.
 
-This module defines small, immutable data structures that represent a
-single scraped snapshot of a PlayStation Store product and a lightweight
-search result used for listing or search endpoints. These are plain
-dataclasses (frozen) so they are hashable and safe to pass between
-components (service, repository, notifier) without accidental mutation.
+**What is a "domain model"?**
+
+These are plain Python objects that represent *business concepts* — a game
+price snapshot, a search result — separate from:
+
+- **HTTP/API layer** (``schemas.py`` — Pydantic models for JSON)
+- **Database layer** (SQLite rows as dicts)
+- **Scraping layer** (``ps_store.py`` / ``ps_graphql.py``)
+
+**Why ``@dataclass(frozen=True)``?**
+
+- ``@dataclass`` auto-generates ``__init__``, ``__repr__``, etc.
+- ``frozen=True`` makes instances **immutable** — once built, fields cannot
+  change accidentally.  Immutable objects are safer to pass between async
+  tasks and easier to reason about.
+
+**Data flow example**
+
+::
+
+    PlayStationStoreClient.fetch_product()
+        → ProductSnapshot
+        → PriceService saves to SQLite
+        → API returns GameOut (Pydantic) to the browser
 
 Typical usage:
   - PlayStationStoreClient.parse_product_page(...) -> ProductSnapshot
@@ -24,6 +43,20 @@ from datetime import datetime
 @dataclass(frozen=True)
 class ProductSnapshot:
     """An immutable snapshot of a product's state at a specific time.
+
+    Think of this as a **photograph** of a store listing: name, price, image,
+    discount text, etc. at the moment we scraped it.
+
+    **Why both cents and formatted strings?**
+
+    - ``current_price_cents`` — for math (comparisons, discount %, DB storage).
+    - ``current_price_formatted`` — for display exactly as the store showed it.
+
+    **Change detection**
+
+    ``raw_source_hash`` is a fingerprint of the underlying HTML/JSON.  If the
+    hash changes on the next fetch, we know the store page content changed
+    even before comparing individual fields.
 
     Attributes:
         product_id: The PS Store product identifier (e.g. "UP0001-CUSA00001_00-EXAMPLEID").
@@ -83,9 +116,13 @@ class ProductSnapshot:
 class SearchResult:
     """Lightweight representation of a product in search results.
 
-    SearchResult contains only the information necessary to list products in
-    search endpoints or selection UIs. It intentionally mirrors a subset of
-    ProductSnapshot for convenience.
+    Smaller than ``ProductSnapshot`` — used when listing many games (search,
+    deals feed, GraphQL catalog sync).  Missing fields like ``availability``
+    or ``fetched_at`` are filled in later when a game is fully tracked.
+
+    ``platforms`` is a **list** (mutable type) but the dataclass itself is
+    frozen — you cannot reassign ``result.platforms``, though the list's
+    contents could theoretically be mutated; callers treat it as read-only.
 
     Attributes:
         product_id: PS Store product identifier.
